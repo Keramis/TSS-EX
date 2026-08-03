@@ -7,6 +7,7 @@ const PERIOD_CODE = { '1': 'FA', '2': 'WI', '3': 'SP', '4': 'SU' };
 
 let planned = [];
 let currentTerm = null;
+let showFinals = false;
 
 // ---------- Storage helpers ----------
 async function loadPlanned() {
@@ -70,10 +71,29 @@ function parseSched(sched, type) {
   for (const line of sched.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    if (/^final\s+examination/i.test(trimmed)) continue;
-    const m = trimmed.match(
+    const isFinal = /^final\s+examination/i.test(trimmed);
+    if (isFinal && !showFinals) continue;
+    // Finals have a date prefix: "Final Examination 12/09/2026 08:00 AM - 10:59 AM In Person @ ..."
+    let m = trimmed.match(
       /^([A-Za-z]{1,2}(?:,\s*[A-Za-z]{1,2})*)\s+(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)\s+In\s+Person\s+@\s+(.+)$/i
     );
+    if (!m && isFinal) {
+      m = trimmed.match(
+        /^Final\s+Examination\s+\d{1,2}\/\d{1,2}\/\d{4}\s+(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)\s+In\s+Person\s+@\s+(.+)$/i
+      );
+      if (m) {
+        // Finals don't have a day-of-week in the Sched string; use a synthetic day 'Final'.
+        blocks.push({
+          day: 'Final',
+          start: to24h(m[1]),
+          end: to24h(m[2]),
+          location: m[3].trim(),
+          type: 'FINAL',
+          isFinal: true,
+        });
+      }
+      continue;
+    }
     if (!m) continue;
     const days = m[1].split(',').map((d) => d.trim()).filter(Boolean);
     const start = to24h(m[2]);
@@ -117,25 +137,53 @@ function groupSections(sections) {
 }
 
 // ---------- Conflict detection ----------
+// Returns { conflictBlockKeys: Set, finalConflictClassIds: Set }
+// conflictBlockKeys: "classId|day|start|end" keys for blocks that overlap a non-final block
+// finalConflictClassIds: class IDs that have a final-exam overlap with another class's final
 function detectConflicts(classes) {
-  const conflictIds = new Set();
-  const allBlocks = [];
+  const conflictBlockKeys = new Set();
+  const finalConflictClassIds = new Set();
+
+  const regularBlocks = [];
+  const finalBlocks = [];
   for (const cls of classes) {
-    for (const b of cls.scheduleBlocks) allBlocks.push({ ...b, classId: cls.id, courseAbbr: cls.courseAbbr });
+    for (const b of cls.scheduleBlocks) {
+      const entry = { ...b, classId: cls.id, courseAbbr: cls.courseAbbr };
+      const key = `${cls.id}|${b.day}|${b.start}|${b.end}`;
+      if (b.isFinal) finalBlocks.push({ ...entry, key });
+      else regularBlocks.push({ ...entry, key });
+    }
   }
-  for (let i = 0; i < allBlocks.length; i++) {
-    for (let j = i + 1; j < allBlocks.length; j++) {
-      const a = allBlocks[i], b = allBlocks[j];
+
+  // Regular conflicts: same day + overlapping time
+  for (let i = 0; i < regularBlocks.length; i++) {
+    for (let j = i + 1; j < regularBlocks.length; j++) {
+      const a = regularBlocks[i], b = regularBlocks[j];
       if (a.day !== b.day) continue;
       const aS = timeToMinutes(a.start), aE = timeToMinutes(a.end);
       const bS = timeToMinutes(b.start), bE = timeToMinutes(b.end);
       if (aS < bE && aE > bS) {
-        conflictIds.add(a.classId);
-        conflictIds.add(b.classId);
+        conflictBlockKeys.add(a.key);
+        conflictBlockKeys.add(b.key);
       }
     }
   }
-  return conflictIds;
+
+  // Final conflicts: two finals overlap in time (day is synthetic 'Final', so compare by time only)
+  for (let i = 0; i < finalBlocks.length; i++) {
+    for (let j = i + 1; j < finalBlocks.length; j++) {
+      const a = finalBlocks[i], b = finalBlocks[j];
+      if (a.classId === b.classId) continue;
+      const aS = timeToMinutes(a.start), aE = timeToMinutes(a.end);
+      const bS = timeToMinutes(b.start), bE = timeToMinutes(b.end);
+      if (aS < bE && aE > bS) {
+        finalConflictClassIds.add(a.classId);
+        finalConflictClassIds.add(b.classId);
+      }
+    }
+  }
+
+  return { conflictBlockKeys, finalConflictClassIds };
 }
 
 // ---------- Calendar ----------
@@ -161,21 +209,26 @@ function renderCalendar() {
     col.innerHTML = '';
     col.style.height = `${(END_HOUR - START_HOUR) * HOUR_HEIGHT}px`;
   }
-  const conflictIds = detectConflicts(planned);
+  const { conflictBlockKeys, finalConflictClassIds } = detectConflicts(planned);
   for (const cls of planned) {
-    const isConflict = conflictIds.has(cls.id);
+    const isFinalConflict = finalConflictClassIds.has(cls.id);
     for (const b of cls.scheduleBlocks) {
+      if (b.isFinal) continue; // finals not rendered on weekly grid
       const col = document.querySelector(`.day-col[data-day="${b.day}"] .day-body`);
       if (!col) continue;
       const startMin = timeToMinutes(b.start) - START_HOUR * 60;
       const endMin = timeToMinutes(b.end) - START_HOUR * 60;
       const top = (startMin / 60) * HOUR_HEIGHT;
       const height = Math.max(((endMin - startMin) / 60) * HOUR_HEIGHT, 18);
+      const key = `${cls.id}|${b.day}|${b.start}|${b.end}`;
+      const isConflict = conflictBlockKeys.has(key);
       const block = document.createElement('div');
       block.className = `block ${b.type.toLowerCase()}${isConflict ? ' conflict' : ''}`;
       block.style.top = `${top}px`;
       block.style.height = `${height}px`;
-      block.title = `${cls.courseAbbr} ${b.type}\n${minutesToLabel(timeToMinutes(b.start))} - ${minutesToLabel(timeToMinutes(b.end))}\n${b.location}${isConflict ? '\n⚠ Conflict' : ''}`;
+      const conflictNote = isConflict ? '\n⚠ Schedule overlap' : '';
+      const finalNote = isFinalConflict ? '\n⚠ Final exam conflict' : '';
+      block.title = `${cls.courseAbbr} ${b.type}\n${minutesToLabel(timeToMinutes(b.start))} - ${minutesToLabel(timeToMinutes(b.end))}\n${b.location}${conflictNote}${finalNote}`;
       block.innerHTML = `<div class="block-title">${cls.courseAbbr}</div><div class="block-time">${b.start}-${b.end}</div><div class="block-loc">${b.location}</div>`;
       col.appendChild(block);
     }
@@ -208,17 +261,34 @@ function renderPlannedList() {
     return;
   }
   empty.classList.add('hidden');
-  const conflictIds = detectConflicts(planned);
+  const { conflictBlockKeys, finalConflictClassIds } = detectConflicts(planned);
   for (const cls of planned) {
-    const isConflict = conflictIds.has(cls.id);
+    const hasScheduleConflict = cls.scheduleBlocks.some(
+      (b) => !b.isFinal && conflictBlockKeys.has(`${cls.id}|${b.day}|${b.start}|${b.end}`)
+    );
+    const hasFinalConflict = finalConflictClassIds.has(cls.id);
     const card = document.createElement('div');
-    card.className = `planned-card${isConflict ? ' conflict-card' : ''}`;
+    let cardClass = 'planned-card';
+    if (hasFinalConflict) cardClass += ' final-conflict-card';
+    else if (hasScheduleConflict) cardClass += ' conflict-card';
+    card.className = cardClass;
 
     const scheduleTags = cls.scheduleBlocks
-      .map((b) => `<span class="schedule-tag ${b.type.toLowerCase()}">${b.day} ${b.start}-${b.end}</span>`)
+      .map((b) => {
+        const key = `${cls.id}|${b.day}|${b.start}|${b.end}`;
+        const isBlockConflict = !b.isFinal && conflictBlockKeys.has(key);
+        return `<span class="schedule-tag ${b.type.toLowerCase()}${isBlockConflict ? ' tag-conflict' : ''}">${b.day} ${b.start}-${b.end}</span>`;
+      })
       .join('');
 
     const seatsCls = seatsClass(cls.seatsAvailable, cls.seatsTotal);
+
+    let conflictNote = '';
+    if (hasFinalConflict) {
+      conflictNote = '<div class="conflict-note conflict-final">⚠ Final exam conflict detected</div>';
+    } else if (hasScheduleConflict) {
+      conflictNote = '<div class="conflict-note conflict-schedule">⚠ Schedule overlap on some sections</div>';
+    }
 
     card.innerHTML = `
       <div class="planned-card-head">
@@ -245,7 +315,7 @@ function renderPlannedList() {
           <span class="planned-info-label">Credits:</span>
           <span>${cls.credits}</span>
         </div>
-        ${isConflict ? '<div class="conflict-note">⚠ Scheduling conflict detected</div>' : ''}
+        ${conflictNote}
       </div>
     `;
     list.appendChild(card);
@@ -502,6 +572,7 @@ function openSectionPicker(course, packages, term) {
       seatsTotal: pkg.seatsTotal,
       instructor: pkg.instructor,
       scheduleBlocks: pkg.scheduleBlocks,
+      _lastPkg: pkg,
       addedAt: Date.now(),
     };
     planned.push(plannedClass);
@@ -532,4 +603,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   const searchBtn = document.getElementById('search-btn');
   searchBtn.addEventListener('click', doSearch);
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+
+  const showFinalsEl = document.getElementById('show-finals');
+  const { settings } = await chrome.storage.local.get('settings');
+  showFinals = settings?.showFinals || false;
+  showFinalsEl.checked = showFinals;
+  showFinalsEl.addEventListener('change', async () => {
+    showFinals = showFinalsEl.checked;
+    await chrome.storage.local.set({ settings: { ...(settings || {}), showFinals } });
+    // Re-parse schedule blocks for all planned classes to include/exclude finals
+    for (const cls of planned) {
+      const pkg = cls._lastPkg;
+      if (!pkg) continue;
+      cls.scheduleBlocks = [];
+      for (const s of pkg.raw) cls.scheduleBlocks.push(...parseSched(s.Sched, s.TeachingMethod));
+    }
+    renderAll();
+  });
 });

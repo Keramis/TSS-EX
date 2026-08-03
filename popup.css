@@ -17,6 +17,8 @@
   --danger: #d1242f;
   --danger-bg: #ffe9ea;
   --conflict: #d1242f;
+  --conflict-warn: #b8860b;
+  --conflict-warn-bg: #fff9e6;
   --le-color: #00629B;
   --di-color: #1a7f37;
   --radius: 6px;
@@ -399,8 +401,8 @@ html, body {
   text-overflow: ellipsis;
 }
 .block.conflict {
-  background: var(--conflict) !important;
-  border: 2px solid #a00;
+  background: #b8860b !important;
+  border: 2px solid #8a6d00;
   z-index: 3;
 }
 .block.conflict::after {
@@ -433,6 +435,10 @@ html, body {
   gap: 6px;
 }
 .planned-card.conflict-card {
+  border-color: #b8860b;
+  background: #fff9e6;
+}
+.planned-card.final-conflict-card {
   border-color: var(--conflict);
   background: var(--danger-bg);
 }
@@ -495,17 +501,19 @@ html, body {
 }
 .schedule-tag.le { background: rgba(0,98,155,0.15); color: var(--le-color); }
 .schedule-tag.di { background: rgba(26,127,55,0.15); color: var(--di-color); }
+.schedule-tag.tag-conflict { background: rgba(184,134,11,0.25); color: #8a6d00; font-weight: 600; }
 .seats-ok { color: var(--di-color); font-weight: 600; }
 .seats-low { color: #b8860b; font-weight: 600; }
 .seats-full { color: var(--danger); font-weight: 600; }
 .conflict-note {
   font-size: 11px;
-  color: var(--danger);
   font-weight: 600;
   display: flex;
   align-items: center;
   gap: 4px;
 }
+.conflict-note.conflict-schedule { color: #b8860b; }
+.conflict-note.conflict-final { color: var(--danger); }
 
 .planned-empty {
   padding: 20px;
