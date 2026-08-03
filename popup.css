@@ -26,8 +26,8 @@
 }
 
 html, body {
-  width: 900px;
-  min-width: 800px;
+  width: 760px;
+  min-width: 760px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 13px;
   color: var(--text);
@@ -368,10 +368,10 @@ html, body {
 /* Calendar blocks */
 .block {
   position: absolute;
-  left: 3px;
-  right: 3px;
+  left: 2px;
+  right: 2px;
   border-radius: 4px;
-  padding: 4px 6px;
+  padding: 3px 5px;
   font-size: 11px;
   color: #fff;
   overflow: hidden;
@@ -379,6 +379,8 @@ html, body {
   border-left: 3px solid rgba(0,0,0,0.25);
   box-shadow: 0 1px 2px rgba(0,0,0,0.15);
   z-index: 1;
+  display: flex;
+  flex-direction: column;
 }
 .block.le { background: var(--le-color); }
 .block.di { background: var(--di-color); }
@@ -396,9 +398,11 @@ html, body {
 .block-loc {
   font-size: 10px;
   opacity: 0.85;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  white-space: normal;
+  line-height: 1.15;
+  margin-top: auto;
 }
 .block.conflict {
   background: #b8860b !important;
