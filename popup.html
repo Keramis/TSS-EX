@@ -14,7 +14,7 @@
         <span class="brand-mark">EZ</span>
         <span class="brand-name">UCSD EZPLAN</span>
       </div>
-      <div id="term-badge" class="term-badge" title="Current term">WI26</div>
+      <div id="term-badge" class="term-badge" title="Current term">—</div>
       <div class="search-wrap">
         <input id="search-input" type="text" placeholder="Search courses (e.g. PHYS 002C, CSE 12)..." autocomplete="off">
         <button id="search-btn" class="btn btn-primary">Search</button>
@@ -23,44 +23,12 @@
 
     <div id="auth-banner" class="auth-banner hidden">
       <span class="auth-icon">!</span>
-      <span class="auth-text">Not connected to TSS. <a id="login-link" href="#">Log into TSS</a> in another tab to capture your session.</span>
-      <button id="auth-dismiss" class="auth-dismiss">&times;</button>
+      <span id="auth-text" class="auth-text"></span>
     </div>
 
     <div id="search-results" class="search-results hidden">
-      <div class="results-header">Results <span class="results-count">3</span></div>
-      <ul class="results-list">
-        <li class="result-item">
-          <div class="result-main">
-            <span class="result-abbr">PHYS-002C</span>
-            <span class="result-title">Physics - Fluids, Waves, Thermodynamics, and Optics</span>
-          </div>
-          <div class="result-meta">
-            <span class="chip">4.00 cr</span>
-            <span class="chip chip-dept">PHYS</span>
-          </div>
-        </li>
-        <li class="result-item">
-          <div class="result-main">
-            <span class="result-abbr">CSE-012</span>
-            <span class="result-title">Programming and Problem Solving</span>
-          </div>
-          <div class="result-meta">
-            <span class="chip">4.00 cr</span>
-            <span class="chip chip-dept">CSE</span>
-          </div>
-        </li>
-        <li class="result-item">
-          <div class="result-main">
-            <span class="result-abbr">MATH-020C</span>
-            <span class="result-title">Calculus and Analytic Geometry</span>
-          </div>
-          <div class="result-meta">
-            <span class="chip">4.00 cr</span>
-            <span class="chip chip-dept">MATH</span>
-          </div>
-        </li>
-      </ul>
+      <div class="results-header">Results <span id="results-count" class="results-count">0</span></div>
+      <ul id="results-list" class="results-list"></ul>
     </div>
 
     <section id="calendar-section" class="calendar-section">

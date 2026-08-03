@@ -2,43 +2,35 @@ const START_HOUR = 8;
 const END_HOUR = 20;
 const HOUR_HEIGHT = 60;
 const DAYS = ['M', 'Tu', 'W', 'Th', 'F'];
-const DAY_LABELS = { M: 'Mon', Tu: 'Tue', W: 'Wed', Th: 'Thu', F: 'Fri' };
+const DEFAULT_TERM = { academicYear: '2026', academicPeriod: '2' };
+const PERIOD_CODE = { '1': 'FA', '2': 'WI', '3': 'SP', '4': 'SU' };
 
-const SAMPLE_PLANNED = [
-  {
-    id: 'p1',
-    moduleID: '14487',
-    courseAbbr: 'PHYS-002C',
-    courseTitle: 'Physics - Fluids, Waves, Thermodynamics, and Optics',
-    credits: '4.00',
-    instructor: 'Tan, Tzer Han',
-    seatsAvailable: 21,
-    seatsTotal: 30,
-    scheduleBlocks: [
-      { day: 'M', start: '09:00', end: '09:50', location: 'Galbraith Hall 242', type: 'LE' },
-      { day: 'W', start: '09:00', end: '09:50', location: 'Galbraith Hall 242', type: 'LE' },
-      { day: 'F', start: '09:00', end: '09:50', location: 'Galbraith Hall 242', type: 'LE' },
-      { day: 'Tu', start: '08:00', end: '08:50', location: 'Galbraith Hall 242', type: 'DI' }
-    ]
-  },
-  {
-    id: 'p2',
-    moduleID: '91001',
-    courseAbbr: 'CSE-012',
-    courseTitle: 'Programming and Problem Solving',
-    credits: '4.00',
-    instructor: 'Cao, Yingzi',
-    seatsAvailable: 5,
-    seatsTotal: 60,
-    scheduleBlocks: [
-      { day: 'Tu', start: '09:30', end: '10:45', location: 'Solis Hall 110', type: 'LE' },
-      { day: 'Th', start: '09:30', end: '10:45', location: 'Solis Hall 110', type: 'LE' }
-    ]
-  }
-];
+let planned = [];
+let currentTerm = null;
 
-let planned = JSON.parse(JSON.stringify(SAMPLE_PLANNED));
+// ---------- Storage helpers ----------
+async function loadPlanned() {
+  const { plannedClasses } = await chrome.storage.local.get('plannedClasses');
+  return Array.isArray(plannedClasses) ? plannedClasses : [];
+}
 
+function savePlanned() {
+  return chrome.storage.local.set({ plannedClasses: planned });
+}
+
+async function loadTerm() {
+  const { currentTerm: t } = await chrome.storage.local.get('currentTerm');
+  currentTerm = t || DEFAULT_TERM;
+  return currentTerm;
+}
+
+function termBadge(term) {
+  const code = PERIOD_CODE[term.academicPeriod] || '?';
+  const yr = String(term.academicYear).slice(-2);
+  return `${code}${yr}`;
+}
+
+// ---------- Time / schedule parsing ----------
 function timeToMinutes(t) {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
@@ -52,13 +44,84 @@ function minutesToLabel(mins) {
   return `${h12}:${m.toString().padStart(2, '0')} ${ampm}`;
 }
 
+function to24h(t) {
+  const m = t.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return t.trim();
+  let h = parseInt(m[1], 10);
+  const min = m[2];
+  const ap = m[3].toUpperCase();
+  if (ap === 'PM' && h !== 12) h += 12;
+  if (ap === 'AM' && h === 12) h = 0;
+  return `${h.toString().padStart(2, '0')}:${min}`;
+}
+
+function normalizeDay(d) {
+  const lower = d.toLowerCase();
+  if (lower === 'tu') return 'Tu';
+  if (lower === 'th') return 'Th';
+  if (lower === 'sa') return 'Sa';
+  if (lower === 'su') return 'Su';
+  return d.charAt(0).toUpperCase();
+}
+
+function parseSched(sched, type) {
+  const blocks = [];
+  if (!sched) return blocks;
+  for (const line of sched.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (/^final\s+examination/i.test(trimmed)) continue;
+    const m = trimmed.match(
+      /^([A-Za-z]{1,2}(?:,\s*[A-Za-z]{1,2})*)\s+(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)\s+In\s+Person\s+@\s+(.+)$/i
+    );
+    if (!m) continue;
+    const days = m[1].split(',').map((d) => d.trim()).filter(Boolean);
+    const start = to24h(m[2]);
+    const end = to24h(m[3]);
+    const location = m[4].trim();
+    for (const d of days) blocks.push({ day: normalizeDay(d), start, end, location, type });
+  }
+  return blocks;
+}
+
+// ---------- Section grouping ----------
+function groupSections(sections) {
+  const map = {};
+  for (const s of sections) {
+    const key = s.EventPkgOtjid;
+    if (!map[key]) {
+      map[key] = {
+        otjid: key,
+        objid: s.EventPkgObjid,
+        displayID: s.EventPkgDisplayID,
+        pkgText: s.EventPkgText || '',
+        methods: [],
+        raw: [],
+        scheduleBlocks: [],
+        seatsAvailable: parseInt(s.EventPkgSeatsAvailable, 10) || 0,
+        seatsTotal: parseInt(s.EventPkgLimit, 10) || 0,
+        instructor: s.InstructorName || 'Staff',
+      };
+    }
+    map[key].raw.push(s);
+    if (!map[key].methods.includes(s.TeachingMethod)) map[key].methods.push(s.TeachingMethod);
+  }
+  for (const key in map) {
+    const pkg = map[key];
+    pkg.scheduleBlocks = [];
+    for (const s of pkg.raw) {
+      pkg.scheduleBlocks.push(...parseSched(s.Sched, s.TeachingMethod));
+    }
+  }
+  return Object.values(map).sort((a, b) => String(a.displayID).localeCompare(String(b.displayID)));
+}
+
+// ---------- Conflict detection ----------
 function detectConflicts(classes) {
   const conflictIds = new Set();
   const allBlocks = [];
   for (const cls of classes) {
-    for (const b of cls.scheduleBlocks) {
-      allBlocks.push({ ...b, classId: cls.id, courseAbbr: cls.courseAbbr });
-    }
+    for (const b of cls.scheduleBlocks) allBlocks.push({ ...b, classId: cls.id, courseAbbr: cls.courseAbbr });
   }
   for (let i = 0; i < allBlocks.length; i++) {
     for (let j = i + 1; j < allBlocks.length; j++) {
@@ -75,6 +138,7 @@ function detectConflicts(classes) {
   return conflictIds;
 }
 
+// ---------- Calendar ----------
 function buildTimeAxis() {
   const axis = document.getElementById('time-axis');
   axis.innerHTML = '';
@@ -118,10 +182,19 @@ function renderCalendar() {
   }
 }
 
+// ---------- Planned list ----------
 function seatsClass(avail, total) {
   if (avail <= 0) return 'seats-full';
   if (avail <= total * 0.15) return 'seats-low';
   return 'seats-ok';
+}
+
+function tssLink(cls) {
+  return (
+    `https://tss.ucsd.edu/fiori#ZUSModule-display?TileType=MYMOD&/Detail/EventPackage/SM/` +
+    `${cls.moduleID}/00000000/0/0/0/00000000-0000-0000-0000-000000000000/` +
+    `${cls.eventPkgObjid}/${cls.academicYear}/${cls.academicPeriod}/?`
+  );
 }
 
 function renderPlannedList() {
@@ -141,9 +214,9 @@ function renderPlannedList() {
     const card = document.createElement('div');
     card.className = `planned-card${isConflict ? ' conflict-card' : ''}`;
 
-    const scheduleTags = cls.scheduleBlocks.map(b =>
-      `<span class="schedule-tag ${b.type.toLowerCase()}">${b.day} ${b.start}-${b.end}</span>`
-    ).join('');
+    const scheduleTags = cls.scheduleBlocks
+      .map((b) => `<span class="schedule-tag ${b.type.toLowerCase()}">${b.day} ${b.start}-${b.end}</span>`)
+      .join('');
 
     const seatsCls = seatsClass(cls.seatsAvailable, cls.seatsTotal);
 
@@ -177,18 +250,18 @@ function renderPlannedList() {
     `;
     list.appendChild(card);
   }
-  list.querySelectorAll('.js-remove').forEach(btn => {
-    btn.addEventListener('click', e => {
+  list.querySelectorAll('.js-remove').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
       const id = e.currentTarget.dataset.id;
-      planned = planned.filter(c => c.id !== id);
-      renderAll();
+      planned = planned.filter((c) => c.id !== id);
+      savePlanned().then(renderAll);
     });
   });
-  list.querySelectorAll('.js-open').forEach(btn => {
-    btn.addEventListener('click', e => {
+  list.querySelectorAll('.js-open').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
       const id = e.currentTarget.dataset.id;
-      const cls = planned.find(c => c.id === id);
-      if (cls) openSectionPicker(cls);
+      const cls = planned.find((c) => c.id === id);
+      if (cls) chrome.tabs.create({ url: tssLink(cls) });
     });
   });
 }
@@ -198,104 +271,265 @@ function renderAll() {
   renderPlannedList();
 }
 
+// ---------- Auth banner ----------
+function showAuthBanner(mode, extra) {
+  const banner = document.getElementById('auth-banner');
+  const text = document.getElementById('auth-text');
+  banner.classList.remove('hidden', 'danger');
+  if (mode === 'expired') {
+    banner.classList.add('danger');
+    text.innerHTML =
+      'Your TSS session has expired. Searching for classes is unavailable until you ' +
+      '<a href="https://tss.ucsd.edu/fiori" target="_blank">log into TSS</a> again. ' +
+      'Your planned classes are preserved.';
+  } else if (mode === 'not-connected') {
+    text.innerHTML =
+      'Not connected to TSS. Open <a href="https://tss.ucsd.edu/fiori" target="_blank">TSS</a> ' +
+      'and log in to capture your session — your planned classes are kept.';
+  } else {
+    banner.classList.add('danger');
+    text.textContent = `Search failed: ${extra || 'unknown error'}. Log into TSS and try again.`;
+  }
+}
+
+function hideAuthBanner() {
+  document.getElementById('auth-banner').classList.add('hidden');
+}
+
+// ---------- Search results ----------
 function showSearchResults(show) {
   const el = document.getElementById('search-results');
   if (show) el.classList.remove('hidden');
   else el.classList.add('hidden');
 }
 
-function openSectionPicker(cls) {
+function renderSearchResults(results) {
+  const list = document.getElementById('results-list');
+  const count = document.getElementById('results-count');
+  list.innerHTML = '';
+  count.textContent = results.length;
+  if (results.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'results-empty';
+    empty.textContent = 'No classes found. Try a different query (e.g. PHYS 002C).';
+    list.appendChild(empty);
+  } else {
+    for (const r of results) {
+      const li = document.createElement('li');
+      li.className = 'result-item';
+      li.innerHTML = `
+        <div class="result-main">
+          <span class="result-abbr">${r.courseAbbr}</span>
+          <span class="result-title">${r.courseTitle}</span>
+        </div>
+        <div class="result-meta">
+          <span class="chip">${r.credits} cr</span>
+          <span class="chip chip-dept">${r.departmentAbbr}</span>
+        </div>`;
+      li.addEventListener('click', () => onResultClick(r));
+      list.appendChild(li);
+    }
+  }
+  showSearchResults(true);
+}
+
+function renderSearchLoading() {
+  const list = document.getElementById('results-list');
+  const count = document.getElementById('results-count');
+  list.innerHTML = '';
+  count.textContent = '…';
+  const loading = document.createElement('li');
+  loading.className = 'results-loading';
+  loading.textContent = 'Searching…';
+  list.appendChild(loading);
+  showSearchResults(true);
+}
+
+async function doSearch() {
+  const input = document.getElementById('search-input');
+  const q = input.value.trim();
+  if (!q) {
+    showSearchResults(false);
+    return;
+  }
+  await loadTerm();
+  renderSearchLoading();
+  let resp;
+  try {
+    resp = await chrome.runtime.sendMessage({ type: 'searchClasses', term: currentTerm, query: q });
+  } catch (e) {
+    showAuthBanner('error', e.message);
+    showSearchResults(false);
+    return;
+  }
+  if (!resp) {
+    showAuthBanner('error', 'no response from background');
+    showSearchResults(false);
+    return;
+  }
+  if (resp.error === 'no-auth' || resp.error === 'auth-expired') {
+    showAuthBanner('expired');
+    showSearchResults(false);
+    return;
+  }
+  if (resp.error) {
+    showAuthBanner('error', `${resp.error}${resp.status ? ` (${resp.status})` : ''}`);
+    showSearchResults(false);
+    return;
+  }
+  hideAuthBanner();
+  renderSearchResults(resp.results || []);
+}
+
+async function onResultClick(course) {
+  const term = currentTerm || (await loadTerm());
+  let resp;
+  try {
+    resp = await chrome.runtime.sendMessage({ type: 'getSections', moduleID: course.moduleID, term });
+  } catch (e) {
+    showAuthBanner('error', e.message);
+    return;
+  }
+  if (resp.error === 'no-auth' || resp.error === 'auth-expired') {
+    showAuthBanner('expired');
+    return;
+  }
+  if (resp.error) {
+    showAuthBanner('error', `${resp.error}${resp.status ? ` (${resp.status})` : ''}`);
+    return;
+  }
+  hideAuthBanner();
+  const packages = groupSections(resp.sections || []);
+  openSectionPicker(course, packages, term);
+}
+
+// ---------- Section picker modal ----------
+function openSectionPicker(course, packages, term) {
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
+
+  if (packages.length === 0) {
+    backdrop.innerHTML = `
+      <div class="modal">
+        <div class="modal-head">
+          <div class="modal-title">${course.courseAbbr} — No sections</div>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="results-empty">No sections are available for this course in the current term.</div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn js-modal-cancel">Close</button>
+        </div>
+      </div>`;
+    document.body.appendChild(backdrop);
+    const close = () => backdrop.remove();
+    backdrop.querySelector('.modal-close').addEventListener('click', close);
+    backdrop.querySelector('.js-modal-cancel').addEventListener('click', close);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+    return;
+  }
+
+  const optionsHtml = packages
+    .map((pkg, i) => {
+      const methodTags = pkg.methods
+        .map((m) => `<span class="method-tag ${m.toLowerCase()}">${m}</span>`)
+        .join('');
+      const detailLines = pkg.scheduleBlocks
+        .map((b) => `<span>${b.day} ${b.start}-${b.end} — ${b.location} (${b.type})</span>`)
+        .join('');
+      const seatsCls = seatsClass(pkg.seatsAvailable, pkg.seatsTotal);
+      return `
+        <div class="package-option" data-idx="${i}">
+          <div class="package-head">
+            <span class="package-id">${pkg.displayID || pkg.otjid} — ${pkg.pkgText}</span>
+            <div class="package-methods">${methodTags}</div>
+          </div>
+          <div class="package-detail">
+            ${detailLines}
+            <span>Seats: <span class="${seatsCls}">${pkg.seatsAvailable}/${pkg.seatsTotal}</span> · ${pkg.instructor}</span>
+          </div>
+        </div>`;
+    })
+    .join('');
+
   backdrop.innerHTML = `
     <div class="modal">
       <div class="modal-head">
-        <div class="modal-title">${cls.courseAbbr} — Choose a Section</div>
+        <div class="modal-title">${course.courseAbbr} — Choose a Section</div>
         <button class="modal-close">&times;</button>
       </div>
-      <div class="modal-body">
-        <div class="package-option">
-          <div class="package-head">
-            <span class="package-id">Section A — #SE00156451</span>
-            <div class="package-methods"><span class="method-tag le">LE</span><span class="method-tag di">DI</span></div>
-          </div>
-          <div class="package-detail">
-            <span>LE: M/W/F 9:00-9:50 AM — Galbraith Hall 242</span>
-            <span>DI: Tu 8:00-8:50 AM — Galbraith Hall 242</span>
-            <span>Seats: 21/30 · Tan, Tzer Han</span>
-          </div>
-        </div>
-        <div class="package-option">
-          <div class="package-head">
-            <span class="package-id">Section B — #SE00156452</span>
-            <div class="package-methods"><span class="method-tag le">LE</span><span class="method-tag di">DI</span></div>
-          </div>
-          <div class="package-detail">
-            <span>LE: M/W/F 10:00-10:50 AM — Galbraith Hall 242</span>
-            <span>DI: Th 8:00-8:50 AM — Galbraith Hall 242</span>
-            <span>Seats: 0/30 · Staff</span>
-          </div>
-        </div>
-        <div class="package-option">
-          <div class="package-head">
-            <span class="package-id">Section C — #SE00156453</span>
-            <div class="package-methods"><span class="method-tag le">LE</span></div>
-          </div>
-          <div class="package-detail">
-            <span>LE: Tu/Th 11:00-12:15 PM — Center Hall 212</span>
-            <span>Seats: 14/40 · Cao, Yingzi</span>
-          </div>
-        </div>
-      </div>
+      <div class="modal-body">${optionsHtml}</div>
       <div class="modal-foot">
         <button class="btn js-modal-cancel">Cancel</button>
         <button class="btn btn-primary js-modal-add">Add to Plan</button>
       </div>
-    </div>
-  `;
+    </div>`;
   document.body.appendChild(backdrop);
-  let selected = null;
-  backdrop.querySelectorAll('.package-option').forEach(opt => {
+
+  let selectedIdx = null;
+  backdrop.querySelectorAll('.package-option').forEach((opt) => {
     opt.addEventListener('click', () => {
-      backdrop.querySelectorAll('.package-option').forEach(o => o.classList.remove('selected'));
+      backdrop.querySelectorAll('.package-option').forEach((o) => o.classList.remove('selected'));
       opt.classList.add('selected');
-      selected = opt;
+      selectedIdx = parseInt(opt.dataset.idx, 10);
     });
   });
+
   const close = () => backdrop.remove();
   backdrop.querySelector('.modal-close').addEventListener('click', close);
   backdrop.querySelector('.js-modal-cancel').addEventListener('click', close);
-  backdrop.addEventListener('click', e => { if (e.target === backdrop) close(); });
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+
   backdrop.querySelector('.js-modal-add').addEventListener('click', () => {
-    if (!selected) {
+    if (selectedIdx === null) {
       alert('Please select a section package.');
       return;
     }
+    const pkg = packages[selectedIdx];
+    const plannedClass = {
+      id: 'p-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+      moduleID: course.moduleID,
+      courseAbbr: course.courseAbbr,
+      courseTitle: course.courseTitle,
+      credits: course.credits,
+      academicYear: course.academicYear || term.academicYear,
+      academicPeriod: course.academicPeriod || term.academicPeriod,
+      departmentAbbr: course.departmentAbbr,
+      selectedPackageOtjid: pkg.otjid,
+      eventPkgObjid: pkg.objid,
+      seatsAvailable: pkg.seatsAvailable,
+      seatsTotal: pkg.seatsTotal,
+      instructor: pkg.instructor,
+      scheduleBlocks: pkg.scheduleBlocks,
+      addedAt: Date.now(),
+    };
+    planned.push(plannedClass);
+    savePlanned().then(renderAll);
     close();
   });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+// ---------- Init ----------
+async function checkAuth() {
+  const { auth } = await chrome.runtime.sendMessage({ type: 'getAuth' });
+  if (!auth || (!auth.cookie && !auth.csrfToken && !auth.sapPassport)) {
+    showAuthBanner('not-connected');
+  } else {
+    hideAuthBanner();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
   buildTimeAxis();
+  planned = await loadPlanned();
+  await loadTerm();
+  document.getElementById('term-badge').textContent = termBadge(currentTerm);
   renderAll();
+  checkAuth();
 
   const input = document.getElementById('search-input');
   const searchBtn = document.getElementById('search-btn');
-  const doSearch = () => {
-    const q = input.value.trim();
-    showSearchResults(q.length > 0);
-  };
   searchBtn.addEventListener('click', doSearch);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
-
-  document.querySelectorAll('.result-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const abbr = item.querySelector('.result-abbr').textContent;
-      openSectionPicker({ courseAbbr: abbr, courseTitle: item.querySelector('.result-title').textContent });
-    });
-  });
-
-  document.getElementById('auth-dismiss').addEventListener('click', () => {
-    document.getElementById('auth-banner').classList.add('hidden');
-  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
 });
