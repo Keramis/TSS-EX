@@ -1,5 +1,5 @@
-const START_HOUR = 8;
-const END_HOUR = 20;
+const START_HOUR = 7;
+const END_HOUR = 21;
 const HOUR_HEIGHT = 60;
 const DAYS = ['M', 'Tu', 'W', 'Th', 'F'];
 const DEFAULT_TERM = { academicYear: '2026', academicPeriod: '2' };
