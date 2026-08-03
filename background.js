@@ -95,7 +95,7 @@ async function searchClasses(term, query) {
 
   const boundary = `batch_id-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const year = term.academicYear;
-  const period = term.academicPeriod;
+  const period = String(term.academicPeriod).padStart(3, '0');
   const searchEnc = encodeURIComponent(query);
   const filter = `(AcademicYear%20eq%20'${year}'%20or%20AcademicYear%20eq%20'${year}')%20and%20AcademicPeriod%20eq%20'${period}'`;
   const getLine =
@@ -112,6 +112,7 @@ async function searchClasses(term, query) {
     'Content-Type: application/http\r\n' +
     'Content-Transfer-Encoding: binary\r\n\r\n' +
     `${getLine}\r\n${partHeaders}\r\n` +
+    '\r\n' +
     `--${boundary}--\r\n`;
 
   let resp;
@@ -166,9 +167,10 @@ async function getSections(moduleID, term) {
   const auth = await getAuth();
   if (!authPresent(auth)) return { error: 'no-auth' };
 
+  const period = String(term.academicPeriod).padStart(3, '0');
   const url =
     `${MODULE_BASE}/YUCSD_CON_MODULE(AcademicYear='${term.academicYear}',` +
-    `AcademicPeriod='${term.academicPeriod}',ModuleID='${moduleID}')/_sections` +
+    `AcademicPeriod='${period}',ModuleID='${moduleID}')/_sections` +
     `?sap-client=500&$select=${SECTION_SELECT}&$skip=0&$top=1000`;
 
   let resp;
