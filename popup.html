@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UCSD EZPLAN</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">EZ</span>
+        <span class="brand-name">UCSD EZPLAN</span>
+      </div>
+      <div id="term-badge" class="term-badge" title="Current term">WI26</div>
+      <div class="search-wrap">
+        <input id="search-input" type="text" placeholder="Search courses (e.g. PHYS 002C, CSE 12)..." autocomplete="off">
+        <button id="search-btn" class="btn btn-primary">Search</button>
+      </div>
+    </header>
+
+    <div id="auth-banner" class="auth-banner hidden">
+      <span class="auth-icon">!</span>
+      <span class="auth-text">Not connected to TSS. <a id="login-link" href="#">Log into TSS</a> in another tab to capture your session.</span>
+      <button id="auth-dismiss" class="auth-dismiss">&times;</button>
+    </div>
+
+    <div id="search-results" class="search-results hidden">
+      <div class="results-header">Results <span class="results-count">3</span></div>
+      <ul class="results-list">
+        <li class="result-item">
+          <div class="result-main">
+            <span class="result-abbr">PHYS-002C</span>
+            <span class="result-title">Physics - Fluids, Waves, Thermodynamics, and Optics</span>
+          </div>
+          <div class="result-meta">
+            <span class="chip">4.00 cr</span>
+            <span class="chip chip-dept">PHYS</span>
+          </div>
+        </li>
+        <li class="result-item">
+          <div class="result-main">
+            <span class="result-abbr">CSE-012</span>
+            <span class="result-title">Programming and Problem Solving</span>
+          </div>
+          <div class="result-meta">
+            <span class="chip">4.00 cr</span>
+            <span class="chip chip-dept">CSE</span>
+          </div>
+        </li>
+        <li class="result-item">
+          <div class="result-main">
+            <span class="result-abbr">MATH-020C</span>
+            <span class="result-title">Calculus and Analytic Geometry</span>
+          </div>
+          <div class="result-meta">
+            <span class="chip">4.00 cr</span>
+            <span class="chip chip-dept">MATH</span>
+          </div>
+        </li>
+      </ul>
+    </div>
+
+    <section id="calendar-section" class="calendar-section">
+      <div class="section-head">
+        <h2>Weekly Calendar</h2>
+        <div class="calendar-controls">
+          <label class="toggle">
+            <input id="show-finals" type="checkbox">
+            <span>Show finals</span>
+          </label>
+        </div>
+      </div>
+      <div id="calendar" class="calendar">
+        <div class="time-axis" id="time-axis"></div>
+        <div class="day-columns" id="day-columns">
+          <div class="day-col" data-day="M">
+            <div class="day-head">Mon</div>
+            <div class="day-body"></div>
+          </div>
+          <div class="day-col" data-day="Tu">
+            <div class="day-head">Tue</div>
+            <div class="day-body"></div>
+          </div>
+          <div class="day-col" data-day="W">
+            <div class="day-head">Wed</div>
+            <div class="day-body"></div>
+          </div>
+          <div class="day-col" data-day="Th">
+            <div class="day-head">Thu</div>
+            <div class="day-body"></div>
+          </div>
+          <div class="day-col" data-day="F">
+            <div class="day-head">Fri</div>
+            <div class="day-body"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="planned-section" class="planned-section">
+      <div class="section-head">
+        <h2>Planned Classes <span id="planned-count" class="count-badge">0</span></h2>
+      </div>
+      <div id="planned-list" class="planned-list"></div>
+      <div id="planned-empty" class="planned-empty hidden">
+        No classes planned yet. Search above and add a section to get started.
+      </div>
+    </section>
+
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

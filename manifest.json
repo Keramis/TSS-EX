@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "UCSD EZPLAN",
+  "version": "0.1.0",
+  "description": "A better class search and planning interface for UCSD's TSS registration platform.",
+  "permissions": ["storage", "webRequest", "sidePanel"],
+  "host_permissions": ["https://tss.ucsd.edu/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://tss.ucsd.edu/fiori*"],
+      "js": ["content.js"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "UCSD EZPLAN"
+  },
+  "side_panel": {
+    "default_path": "popup.html"
+  },
+  "icons": {
+    "128": "icon.png"
+  }
+}
