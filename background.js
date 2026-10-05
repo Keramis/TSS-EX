@@ -3,12 +3,15 @@
 
 const MODULE_BASE =
   'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd/sap/yucsd_con_module_servicedef/0001';
+const BOOKING_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV';
 const UTILS_URL_FILTER = 'https://tss.ucsd.edu/sap/opu/odata4/sap/ysb_fiori_utils/*';
 
 const SEARCH_SELECT =
   'AcademicLevel,AcademicPeriod,AcademicYear,CourseAbbr,CourseTitle,CreditsDisplay,DepartmentAbbr,DepartmentText,ModuleID,incrementDisplay';
 const SECTION_SELECT =
   'AcPeriod,AcYear,EventAbbr,EventID,EventPkgDisable,EventPkgDisplayID,EventPkgLimit,EventPkgNumOnWaitl,EventPkgObjid,EventPkgOtjid,EventPkgSeatsAvailable,EventPkgSemanticColorCapacity,EventPkgStatusText,EventPkgText,InstructorEmail,InstructorName,ModuleID,Sched,Status,StatusSemantic,TeachingMethod,TeachingMethod_Text,locationText';
+let bookingRequestQueue = Promise.resolve();
+let lastBookingRequestAt = 0;
 
 // ----- Passive auth capture -----
 chrome.webRequest.onBeforeSendHeaders.addListener(
@@ -38,6 +41,11 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 async function getAuth() {
   const { auth } = await chrome.storage.local.get('auth');
   return auth;
+}
+
+async function getSessionStatus() {
+  const auth = await getAuth();
+  return { connected: Boolean(authPresent(auth)), capturedAt: auth?.capturedAt || null };
 }
 
 function authPresent(auth) {
@@ -166,6 +174,9 @@ async function searchClasses(term, query) {
 async function getSections(moduleID, term) {
   const auth = await getAuth();
   if (!authPresent(auth)) return { error: 'no-auth' };
+  if (!/^\d+$/.test(String(moduleID || '')) || !/^\d+$/.test(String(term?.academicYear || '')) || !/^\d+$/.test(String(term?.academicPeriod || ''))) {
+    return { error: 'invalid-request' };
+  }
 
   const period = String(term.academicPeriod).padStart(3, '0');
   const url =
@@ -205,6 +216,126 @@ async function getSections(moduleID, term) {
   return { sections: data.value || [] };
 }
 
+// ----- API: get booking state and dated event schedules -----
+async function fetchBookingDetails(moduleID, eventPkgObjid, term) {
+  const auth = await getAuth();
+  if (!authPresent(auth)) return { error: 'no-auth' };
+
+  const year = String(term?.academicYear || '');
+  const period = String(term?.academicPeriod || '');
+  const packageID = String(eventPkgObjid || '');
+  if (!/^\d+$/.test(moduleID) || !/^\d+$/.test(year) || !/^\d+$/.test(period) || !/^\d+$/.test(packageID)) {
+    return { error: 'invalid-request' };
+  }
+
+  const url = `${BOOKING_BASE}/ModuleHeaderSet(` +
+    `SmObjid='${moduleID}',SmOtype='SM',ScObjid='00000000',` +
+    `ModregId=guid'00000000-0000-0000-0000-000000000000',` +
+    `EventPackageId='${packageID}',AcademicYear='${year}',AcademicSession='${period}')` +
+    `/Event?sap-client=500&$expand=BookingCheckLog%2CRequest%2CEventSchedule%2CCreditOptions`;
+
+  let resp;
+  try {
+    resp = await fetch(url, {
+      headers: {
+        Accept: 'application/json',
+        'Accept-Language': 'en',
+        'sap-passport': auth.sapPassport || '',
+        'x-csrf-token': auth.csrfToken || '',
+        'x-requested-with': 'XMLHttpRequest',
+      },
+      credentials: 'include',
+    });
+  } catch (e) {
+    return { error: 'network', message: e.message };
+  }
+
+  if (resp.status === 401 || resp.status === 403 || resp.status === 302) {
+    return { error: 'auth-expired', status: resp.status };
+  }
+  if (!resp.ok) return { error: 'http', status: resp.status };
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    return { error: 'parse', message: e.message };
+  }
+  return { events: data?.d?.results || [] };
+}
+
+function getBookingDetails(moduleID, eventPkgObjid, term) {
+  const request = bookingRequestQueue.then(async () => {
+    const pause = Math.max(0, 1200 - (Date.now() - lastBookingRequestAt));
+    if (pause) await new Promise((resolve) => setTimeout(resolve, pause));
+    lastBookingRequestAt = Date.now();
+    return fetchBookingDetails(moduleID, eventPkgObjid, term);
+  });
+  bookingRequestQueue = request.catch(() => undefined);
+  return request;
+}
+
+// ----- API: get prerequisites -----
+function formatDate(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+async function getRequirements(moduleID) {
+  const auth = await getAuth();
+  if (!authPresent(auth)) return { error: 'no-auth' };
+
+  const boundary = `batch_id-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const keydate = formatDate(new Date());
+  const getLine = `GET YUCSD_I_PREREQ_TREE(moduleid='${moduleID}',keydate=${keydate})/Set?$skip=0&$top=100 HTTP/1.1`;
+  const partHeaders =
+    'Accept: application/json;odata.metadata=minimal;IEEE754Compatible=true\r\n' +
+    'Accept-Language: en\r\n' +
+    `X-CSRF-Token: ${auth.csrfToken || ''}\r\n` +
+    'Content-Type: application/json;charset=UTF-8;IEEE754Compatible=true\r\n';
+
+  const body =
+    `--${boundary}\r\n` +
+    'Content-Type: application/http\r\n' +
+    'Content-Transfer-Encoding: binary\r\n\r\n' +
+    `${getLine}\r\n${partHeaders}\r\n` +
+    '\r\n' +
+    `--${boundary}--\r\n`;
+
+  let resp;
+  try {
+    resp = await fetch(`${MODULE_BASE}/$batch?sap-client=500`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/mixed; boundary=${boundary}`,
+        Accept: 'multipart/mixed',
+        'Accept-Language': 'en',
+        'odata-maxversion': '4.0',
+        'odata-version': '4.0',
+        'sap-passport': auth.sapPassport || '',
+        'x-csrf-token': auth.csrfToken || '',
+        'x-requested-with': 'XMLHttpRequest',
+        'x-xhr-logon': 'accept="iframe,strict-window,window"',
+      },
+      credentials: 'include',
+      body,
+    });
+  } catch (e) {
+    return { error: 'network', message: e.message };
+  }
+
+  if (resp.status === 401 || resp.status === 403 || resp.status === 302) {
+    return { error: 'auth-expired', status: resp.status };
+  }
+  if (!resp.ok) return { error: 'http', status: resp.status };
+
+  const text = await resp.text();
+  const obj = extractJson(text);
+  return { requirements: (obj && obj.value) || [] };
+}
+
 // ----- Message router -----
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'searchClasses') {
@@ -215,8 +346,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     getSections(msg.moduleID, msg.term).then(sendResponse);
     return true;
   }
-  if (msg.type === 'getAuth') {
-    getAuth().then((auth) => sendResponse({ auth }));
+  if (msg.type === 'getBookingDetails') {
+    getBookingDetails(msg.moduleID, msg.eventPkgObjid, msg.term).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'getRequirements') {
+    getRequirements(msg.moduleID).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'getSessionStatus') {
+    getSessionStatus().then(sendResponse);
     return true;
   }
   return false;

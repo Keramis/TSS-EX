@@ -20,7 +20,7 @@
     "default_title": "UCSD EZPLAN"
   },
   "side_panel": {
-    "default_path": "popup.html"
+    "default_path": "planner.html"
   },
   "icons": {
     "128": "icon.png"

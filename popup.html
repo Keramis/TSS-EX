@@ -6,7 +6,7 @@
   <title>UCSD EZPLAN</title>
   <link rel="stylesheet" href="popup.css">
 </head>
-<body>
+<body class="compact-view">
   <div id="app">
 
     <header class="topbar">
@@ -15,6 +15,7 @@
         <span class="brand-name">UCSD EZPLAN</span>
       </div>
       <div id="term-badge" class="term-badge" title="Current term">—</div>
+      <button id="open-planner" class="btn btn-small">Full planner</button>
       <div class="search-wrap">
         <input id="search-input" type="text" placeholder="Search courses (e.g. PHYS 002C, CSE 12)..." autocomplete="off">
         <button id="search-btn" class="btn btn-primary">Search</button>
@@ -64,15 +65,34 @@
             <div class="day-head">Fri</div>
             <div class="day-body"></div>
           </div>
+          <div class="day-col" data-day="Sa">
+            <div class="day-head">Sat</div>
+            <div class="day-body"></div>
+          </div>
+          <div class="day-col" data-day="Su">
+            <div class="day-head">Sun</div>
+            <div class="day-body"></div>
+          </div>
         </div>
       </div>
     </section>
 
+    <div class="source-status">
+      <span id="capture-meta">Last TSS session capture: —</span>
+      <span id="refresh-meta">Class details have not been refreshed yet.</span>
+    </div>
+
     <section id="planned-section" class="planned-section">
       <div class="section-head">
         <h2>Planned Classes <span id="planned-count" class="count-badge">0</span></h2>
+        <button id="refresh-all" class="btn btn-small">Refresh all class info</button>
       </div>
+      <div id="refresh-status" class="refresh-status hidden" role="status"></div>
       <div id="planned-list" class="planned-list"></div>
+      <section id="finals-section" class="finals-section hidden">
+        <h3>Final exams</h3>
+        <div id="finals-list" class="finals-list"></div>
+      </section>
       <div id="planned-empty" class="planned-empty hidden">
         No classes planned yet. Search above and add a section to get started.
       </div>
