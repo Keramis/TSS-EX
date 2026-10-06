@@ -81,6 +81,14 @@ function normalizeDay(d) {
   return d.charAt(0).toUpperCase();
 }
 
+function meetingTypeClass(type) {
+  const normalized = String(type || '').trim().toUpperCase();
+  if (normalized === 'LE' || normalized === 'L' || normalized.includes('LECTURE')) return 'le';
+  if (normalized === 'DI' || normalized.includes('DISCUSSION')) return 'di';
+  if (normalized === 'LA' || normalized === 'LB' || normalized === 'LAB' || normalized.includes('LAB')) return 'lab';
+  return 'other';
+}
+
 function parseSched(sched, type) {
   const blocks = [];
   if (!sched) return blocks;
@@ -303,7 +311,7 @@ function renderCalendar() {
       const isConflict = conflictBlockKeys.has(key);
       const lane = laneByBlock.get(b) || { lane: 0, laneCount: 1 };
       const block = document.createElement('div');
-      block.className = `block ${(b.type || 'LE').toLowerCase()}${isConflict ? ' conflict' : ''}${lane.laneCount > 1 ? ' overlap-lane' : ''}`;
+      block.className = `block ${meetingTypeClass(b.type || 'LE')}${isConflict ? ' conflict' : ''}${lane.laneCount > 1 ? ' overlap-lane' : ''}`;
       block.style.top = `${top}px`;
       block.style.height = `${height}px`;
       block.style.left = `calc(${lane.lane * 100 / lane.laneCount}% + 2px)`;
@@ -379,12 +387,16 @@ function roomLabel(location) {
 
 function openScheduleQuicklook(cls, block) {
   if (selectedDetailId) return;
+  const meetingType = meetingTypeClass(block.type);
+  const meetingLabel = ({ le: 'Lecture', di: 'Discussion', lab: 'Lab' })[meetingType] || 'Class';
+  const badgeClass = ({ le: 'lecture', di: 'discussion', lab: 'lab' })[meetingType] || 'other';
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML = `<div class="modal schedule-quicklook-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(cls.courseAbbr)} class details">
     <div class="modal-head"><div class="modal-title">${escapeHtml(cls.courseAbbr)} · ${escapeHtml(cls.courseTitle)}</div><button class="modal-close" aria-label="Close">&times;</button></div>
     <div class="modal-body">
       <div class="detail-grid">
+        <span>Type</span><strong><span class="detail-type-badge ${badgeClass}">${meetingLabel}</span></strong>
         <span>Professor</span><strong>${escapeHtml(cls.instructor || 'Staff')}</strong>
         <span>Room</span><strong>${escapeHtml(block.location || 'Room unavailable')}</strong>
         <span>Time</span><strong>${escapeHtml(minutesToLabel(timeToMinutes(block.start)))} – ${escapeHtml(minutesToLabel(timeToMinutes(block.end)))}</strong>
@@ -447,7 +459,8 @@ function detailScheduleHtml(blocks) {
   const rows = groupScheduleBlocks(blocks, true, true);
   return rows.map(({ block, dayLabel }) => {
     const code = block.isFinal ? 'FI' : block.type === 'LE' ? 'L' : block.type;
-    const className = block.isFinal ? 'final' : code === 'L' ? 'lecture' : code === 'DI' ? 'discussion' : 'other';
+    const typeClass = meetingTypeClass(block.type);
+    const className = block.isFinal ? 'final' : typeClass === 'le' ? 'lecture' : typeClass === 'di' ? 'discussion' : typeClass === 'lab' ? 'lab' : 'other';
     const label = block.isFinal
       ? `Final exam · ${finalDateLabel(block)} · ${compactTimeRange(block.start, block.end)} · ${block.location}`
       : `${dayLabel} ${compactTimeRange(block.start, block.end)} · ${block.location}`;
@@ -812,9 +825,9 @@ function bookingDetailHtml(cls) {
         <span>Room</span><strong>${escapeHtml(event.room || 'Unavailable')}</strong>
         <span>Registration window</span><strong>${escapeHtml([event.registrationBegin, event.registrationEnd].filter(Boolean).join(' – ') || 'Unavailable')}</strong>
       </div>
-      ${event.events?.length ? `<div class="detail-meetings"><h5>Meetings</h5><ul>${event.events.map((meeting) => `
+      ${event.events?.length ? `<details class="detail-meetings"><summary>Meetings</summary><ul>${event.events.map((meeting) => `
         <li><strong>${escapeHtml(meeting.day)} ${escapeHtml(meeting.date)}</strong><span>${escapeHtml(meeting.start)}–${escapeHtml(meeting.end)}</span><span>${escapeHtml(meeting.kind || 'Meeting')}</span><span>${escapeHtml(meeting.location || 'Location unavailable')}</span></li>
-      `).join('')}</ul></div>` : '<p class="muted">No dated meeting information is cached.</p>'}
+      `).join('')}</ul></details>` : '<p class="muted">No dated meeting information is cached.</p>'}
     </section>`;
   }).join('');
 }
@@ -1488,7 +1501,7 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
   const optionsHtml = packages
     .map((pkg, i) => {
       const methodTags = pkg.methods
-        .map((m) => `<span class="method-tag ${escapeHtml(m.toLowerCase())}">${escapeHtml(m)}</span>`)
+        .map((m) => `<span class="method-tag ${meetingTypeClass(m)}">${escapeHtml(m)}</span>`)
         .join('');
       const detailLines = pkg.scheduleBlocks
         .map((b) => `<span>${escapeHtml(b.isFinal ? `${finalDateLabel(b)} ${finalTimeLabel(b)}` : `${b.day} ${b.start}-${b.end}`)} — ${escapeHtml(b.location)} (${escapeHtml(b.type)})</span>`)

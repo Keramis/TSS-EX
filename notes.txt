@@ -1,0 +1,9 @@
+Make time at the left wider so that AM/PM times aren't on 2-lines
+Put sunday at the front of Monday (sunday starts the week)
+Improve color scheme / contrast (I'll have to have a color pallete):
+Locked in color pallete:
+Dark brown/olive (deep mocha): #433633
+Grey (cool steel): #A4A9AD
+(Stormy Teal): #00635D
+(Pumpkin Spice): #EE7B30
+Light blue (Powder Blue): #9EB3C2

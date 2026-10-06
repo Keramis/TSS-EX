@@ -420,6 +420,8 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
 }
 .block.le { background: var(--le-color); }
 .block.di { background: var(--di-color); }
+.block.lab { background: #7651a8; }
+.block.other { background: #586779; }
 .block:focus-visible { outline: 2px solid var(--ucsd-blue); outline-offset: 1px; z-index: 5; }
 .block-title {
   font-weight: 600;
@@ -701,6 +703,8 @@ body.full-planner .final-block-details { font-size: 10px; }
 }
 .method-tag.le { background: var(--le-color); color: #fff; }
 .method-tag.di { background: var(--di-color); color: #fff; }
+.method-tag.lab { background: #7651a8; color: #fff; }
+.method-tag.other { background: #586779; color: #fff; }
 .package-detail {
   font-size: 12px;
   color: var(--muted);
@@ -781,7 +785,10 @@ body.full-planner #open-planner { display: none; }
 .detail-event { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .detail-event h3 { font-size: 13px; margin-bottom: 8px; color: var(--ucsd-blue); }
 .detail-event h4 { margin: 0 0 7px; color: var(--ucsd-blue); font-size: 12px; }
-.detail-meetings h5 { margin: 0 0 5px; color: var(--text); font-size: 11px; }
+.detail-meetings > summary { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; color: var(--text); font-size: 11px; font-weight: 600; cursor: pointer; list-style: none; }
+.detail-meetings > summary::-webkit-details-marker { display: none; }
+.detail-meetings > summary::before { content: ""; width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform 120ms ease; }
+.detail-meetings[open] > summary::before { transform: rotate(45deg); }
 .detail-meetings ul { display: flex; flex-direction: column; gap: 5px; margin: 0; padding: 0; list-style: none; }
 .detail-meetings li { display: grid; grid-template-columns: minmax(100px, 1fr) auto minmax(80px, 0.7fr) minmax(120px, 1.5fr); gap: 8px; align-items: start; padding: 6px 8px; border-radius: 4px; background: #f7f9fb; }
 .detail-meetings li strong { font-weight: 600; }
@@ -795,8 +802,9 @@ body.full-planner #open-planner { display: none; }
 .detail-section-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; background: #f7f9fb; border-radius: 4px; font-size: 12px; }
 .detail-section-row > span:last-child { min-width: 0; line-height: 1.4; }
 .detail-type-badge { flex: 0 0 auto; min-width: 22px; padding: 2px 5px; border-radius: 10px; text-align: center; font-size: 10px; font-weight: 700; line-height: 1.2; }
-.detail-type-badge.lecture { background: #dff2e4; color: #24633a; }
-.detail-type-badge.discussion { background: #dceaf8; color: #245a91; }
+.detail-type-badge.lecture { background: rgba(0,98,155,0.15); color: var(--le-color); }
+.detail-type-badge.discussion { background: rgba(26,127,55,0.15); color: var(--di-color); }
+.detail-type-badge.lab { background: #eee7f7; color: #68428f; }
 .detail-type-badge.final { background: #fff0bc; color: #755400; }
 .detail-type-badge.other { background: #e8ebef; color: #48525c; }
 .detail-empty { padding: 10px; color: var(--muted); background: #f7f9fb; border-radius: 4px; font-size: 12px; }
