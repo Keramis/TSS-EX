@@ -7,6 +7,9 @@ const BOOKING_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_S
 const AUTH_START_URL = 'https://sis.ucsd.edu/';
 const CSRF_URL = `${MODULE_BASE}/$metadata?sap-client=500`;
 const AUTH_VERIFY_URL = `${MODULE_BASE}/YUCSD_CON_MODULE?sap-client=500&$select=ModuleID&$top=1`;
+const TSS_SESSION_CACHE_KEY = 'tssSessionVerification';
+const TSS_SESSION_SUCCESS_TTL = 5 * 60 * 1000;
+const TSS_SESSION_FAILURE_TTL = 10 * 1000;
 const SEARCH_SELECT =
   'AcademicLevel,AcademicPeriod,AcademicYear,CourseAbbr,CourseTitle,CreditsDisplay,DepartmentAbbr,DepartmentText,ModuleID,incrementDisplay';
 const SECTION_SELECT =
@@ -31,6 +34,9 @@ function captureAuthHeaders(headers) {
       sapPassport: cookieChanged ? null : headers.sapPassport || previous?.sapPassport || null,
       csrfToken: cookieChanged ? null : headers.csrfToken || previous?.csrfToken || null,
     };
+    if (cookieChanged && !(await getCachedTssSessionVerification())?.connected) {
+      await chrome.storage.session.remove(TSS_SESSION_CACHE_KEY).catch(() => undefined);
+    }
     const changed = next.cookie !== (previous?.cookie || null)
       || next.sapPassport !== (previous?.sapPassport || null)
       || next.csrfToken !== (previous?.csrfToken || null);
@@ -174,9 +180,7 @@ async function ensureCsrfToken(force = false) {
     if (!token || /^(fetch|required)$/i.test(token)) return;
     await authCaptureQueue;
     const auth = await getAuth();
-    if (authPresent(auth)) {
-      await chrome.storage.local.set({ auth: { ...auth, csrfToken: token, capturedAt: Date.now() } });
-    }
+    await chrome.storage.local.set({ auth: { ...(auth || {}), csrfToken: token, capturedAt: Date.now() } });
   } catch {
     // Read-only API calls can still work if this service does not issue a token.
   } finally {
@@ -184,9 +188,34 @@ async function ensureCsrfToken(force = false) {
   }
 }
 
-async function verifyTssSession() {
+async function getCachedTssSessionVerification() {
+  try {
+    const { [TSS_SESSION_CACHE_KEY]: cached } = await chrome.storage.session.get(TSS_SESSION_CACHE_KEY);
+    if (!cached || !Number.isFinite(cached.checkedAt) || !cached.result) return null;
+    const ttl = cached.result.connected ? TSS_SESSION_SUCCESS_TTL : TSS_SESSION_FAILURE_TTL;
+    return Date.now() - cached.checkedAt < ttl ? cached.result : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheTssSessionVerification(result) {
+  try {
+    await chrome.storage.session.set({
+      [TSS_SESSION_CACHE_KEY]: { checkedAt: Date.now(), result },
+    });
+  } catch {
+    // Session status can still be returned if the short-lived cache is unavailable.
+  }
+}
+
+async function verifyTssSession(force = false) {
+  if (!force) {
+    const cached = await getCachedTssSessionVerification();
+    if (cached) return cached;
+  }
   if (sessionVerificationPromise) return sessionVerificationPromise;
-  sessionVerificationPromise = (async () => {
+  const verificationPromise = (async () => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
@@ -202,8 +231,7 @@ async function verifyTssSession() {
       const data = await resp.json();
       if (!Array.isArray(data?.value)) return { connected: false, error: 'invalid-response' };
       await authCaptureQueue;
-      if (!authPresent(await getAuth())) return { connected: false, error: 'no-auth' };
-      await ensureCsrfToken();
+      ensureCsrfToken().catch(() => undefined);
       return { connected: true, error: null };
     } catch {
       return { connected: false, error: 'network' };
@@ -211,10 +239,13 @@ async function verifyTssSession() {
       clearTimeout(timeout);
     }
   })();
+  sessionVerificationPromise = verificationPromise;
   try {
-    return await sessionVerificationPromise;
+    const result = await verificationPromise;
+    await cacheTssSessionVerification(result);
+    return result;
   } finally {
-    sessionVerificationPromise = null;
+    if (sessionVerificationPromise === verificationPromise) sessionVerificationPromise = null;
   }
 }
 
@@ -286,6 +317,7 @@ async function startReauth() {
       }
       reauthLandingAgain = false;
       reauthFinalDocumentSeen = false;
+      await chrome.storage.session.remove(TSS_SESSION_CACHE_KEY).catch(() => undefined);
       await setReauthFlow({ phase: 'pending', sawAcs: false, startedAt: Date.now() });
       const loginWindow = await chrome.windows.create({
         url: 'about:blank', type: 'popup', width: 600, height: 800, focused: true,
@@ -323,8 +355,7 @@ async function finishReauth(tabId, finalDocument = false) {
   if (flow.phase !== 'pending') return;
   await setReauthFlow({ ...flow, phase: 'verifying' });
   await authCaptureQueue;
-  const hadCsrfToken = Boolean((await getAuth())?.csrfToken);
-  const verification = await verifyTssSession();
+  const verification = await verifyTssSession(true);
   const current = await getReauthFlow();
   if (current?.windowId !== flow.windowId || current?.phase !== 'verifying') return;
   if (!verification.connected) {
@@ -336,7 +367,6 @@ async function finishReauth(tabId, finalDocument = false) {
     if (retry && !finalLanding) finishReauth(tabId).catch(() => undefined);
     return;
   }
-  if (hadCsrfToken) await ensureCsrfToken(true);
   reauthLandingAgain = false;
   reauthFinalDocumentSeen = false;
   await clearAuthFault();
@@ -353,7 +383,7 @@ async function handleReauthNavigation(tabId, change, tab) {
     if (flow?.tabId !== tabId || !['pending', 'verifying'].includes(flow.phase)) return;
     if (landing.pathname === '/sap/saml2/sp/acs/500') {
       if (!flow.sawAcs) await setReauthFlow({ ...flow, sawAcs: true });
-    } else if (landing.pathname === '/fiori' && flow.sawAcs) {
+    } else if (landing.pathname === '/fiori' && flow.sawAcs && change.status === 'complete') {
       finishReauth(tabId).catch(() => undefined);
     }
   } catch {
