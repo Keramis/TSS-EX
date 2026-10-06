@@ -4,13 +4,16 @@ const PERIOD_CODE = { '1': 'FA', '2': 'WI', '3': 'SP', '4': 'SU' };
 
 let planned = [];
 let currentTerm = null;
-let showFinals = true;
+const showFinals = true;
 let isPlanner = false;
 let selectedDetailId = null;
 let authCheckSequence = 0;
 let activeRefreshId = null;
+let fullRefreshStarting = false;
 let observedRefreshId = null;
 let refreshStopRequested = false;
+const singleClassRefreshes = new Map();
+let singleRefreshQueue = Promise.resolve();
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -219,6 +222,37 @@ function calendarLayout() {
   return { start, end: Math.max(end, start + 1), hourHeight: Math.min(34, 315 / Math.max(1, end - start)) };
 }
 
+function assignOverlapLanes(entries) {
+  const sorted = [...entries].sort((a, b) => timeToMinutes(a.block.start) - timeToMinutes(b.block.start));
+  const laidOut = [];
+  let cluster = [];
+  let clusterEnd = -1;
+  const finishCluster = () => {
+    if (!cluster.length) return;
+    const laneEnds = [];
+    for (const entry of cluster) {
+      const start = timeToMinutes(entry.block.start);
+      const end = timeToMinutes(entry.block.end);
+      let lane = laneEnds.findIndex((endAt) => endAt <= start);
+      if (lane < 0) lane = laneEnds.length;
+      laneEnds[lane] = end;
+      entry.lane = lane;
+    }
+    for (const entry of cluster) entry.laneCount = laneEnds.length;
+    laidOut.push(...cluster);
+    cluster = [];
+    clusterEnd = -1;
+  };
+  for (const entry of sorted) {
+    const start = timeToMinutes(entry.block.start);
+    if (cluster.length && start >= clusterEnd) finishCluster();
+    cluster.push(entry);
+    clusterEnd = Math.max(clusterEnd, timeToMinutes(entry.block.end));
+  }
+  finishCluster();
+  return laidOut;
+}
+
 function buildTimeAxis(layout) {
   const axis = document.getElementById('time-axis');
   axis.innerHTML = '';
@@ -248,6 +282,13 @@ function renderCalendar() {
     col.style.setProperty('--hour-height', `${layout.hourHeight}px`);
   }
   const { conflictBlockKeys, finalConflictClassIds } = detectConflicts(planned);
+  const laneByBlock = new Map();
+  for (const day of DAYS) {
+    const entries = planned.flatMap((cls) => (cls.scheduleBlocks || [])
+      .filter((block) => !block.isFinal && block.day === day)
+      .map((block) => ({ cls, block })));
+    for (const entry of assignOverlapLanes(entries)) laneByBlock.set(entry.block, entry);
+  }
   for (const cls of planned) {
     const isFinalConflict = finalConflictClassIds.has(cls.id);
     for (const b of cls.scheduleBlocks) {
@@ -260,10 +301,14 @@ function renderCalendar() {
       const height = Math.max(((endMin - startMin) / 60) * layout.hourHeight, isPlanner ? 22 : 8);
       const key = `${cls.id}|${b.day}|${b.start}|${b.end}`;
       const isConflict = conflictBlockKeys.has(key);
+      const lane = laneByBlock.get(b) || { lane: 0, laneCount: 1 };
       const block = document.createElement('div');
-      block.className = `block ${b.type.toLowerCase()}${isConflict ? ' conflict' : ''}`;
+      block.className = `block ${(b.type || 'LE').toLowerCase()}${isConflict ? ' conflict' : ''}${lane.laneCount > 1 ? ' overlap-lane' : ''}`;
       block.style.top = `${top}px`;
       block.style.height = `${height}px`;
+      block.style.left = `calc(${lane.lane * 100 / lane.laneCount}% + 2px)`;
+      block.style.width = `calc(${100 / lane.laneCount}% - 4px)`;
+      block.style.right = 'auto';
       const conflictNote = isConflict ? '\n⚠ Schedule overlap' : '';
       const finalNote = isFinalConflict ? '\n⚠ Final exam conflict' : '';
       block.title = `${cls.courseAbbr} ${b.type}\n${minutesToLabel(timeToMinutes(b.start))} - ${minutesToLabel(timeToMinutes(b.end))}\n${b.location}${conflictNote}${finalNote}`;
@@ -457,7 +502,7 @@ function renderFinalCalendar() {
     axis.appendChild(label);
   }
 
-  columns.style.gridTemplateColumns = `repeat(${sortedDates.length}, minmax(58px, 1fr))`;
+  columns.style.gridTemplateColumns = `repeat(${sortedDates.length}, minmax(128px, 1fr))`;
   columns.style.setProperty('--final-hour-height', `${hourHeight}px`);
   for (const [dateKey, group] of sortedDates) {
     const day = document.createElement('section');
@@ -470,27 +515,29 @@ function renderFinalCalendar() {
     const events = document.createElement('div');
     events.className = 'final-day-events';
     events.style.height = `${bodyHeight}px`;
-    const placements = [];
-    for (const item of group.blocks.sort((a, b) => timeToMinutes(a.block.start) - timeToMinutes(b.block.start))) {
-      const start = timeToMinutes(item.block.start);
-      const end = timeToMinutes(item.block.end);
-      let lane = placements.findIndex((placement) => placement.endsAt <= start);
-      if (lane < 0) lane = placements.length;
-      placements[lane] = { endsAt: end };
-      item.lane = lane;
-    }
-    const laneCount = Math.max(1, placements.length);
-    for (const item of group.blocks) {
+    const finalEntries = assignOverlapLanes(group.blocks.map((item) => ({ item, block: item.block })));
+    for (const placement of finalEntries) {
+      const { item, lane, laneCount } = placement;
       const top = ((timeToMinutes(item.block.start) - firstHour * 60) / 60) * hourHeight;
       const height = Math.max(((timeToMinutes(item.block.end) - timeToMinutes(item.block.start)) / 60) * hourHeight, 14);
       const event = document.createElement('div');
       event.className = `final-time-block${laneCount > 1 ? ' final-time-conflict' : ''}`;
       event.style.top = `${top}px`;
       event.style.height = `${height}px`;
-      event.style.left = `${(item.lane / laneCount) * 100}%`;
+      event.style.left = `${(lane / laneCount) * 100}%`;
       event.style.width = `${100 / laneCount}%`;
-      event.textContent = item.cls.courseAbbr;
+      const course = document.createElement('span');
+      course.className = 'final-block-course';
+      course.textContent = item.cls.courseAbbr;
+      const time = document.createElement('span');
+      time.className = 'final-block-time';
+      time.textContent = compactTimeRange(item.block.start, item.block.end);
+      const details = document.createElement('span');
+      details.className = 'final-block-details';
+      details.textContent = `${item.block.location || 'Room unavailable'} | ${item.cls.instructor || 'Staff'}`;
+      event.append(course, time, details);
       event.title = `${item.cls.courseAbbr} · ${compactTimeRange(item.block.start, item.block.end)} · ${roomLabel(item.block.location)}`;
+      event.title = [item.cls.courseAbbr, item.cls.courseTitle, compactTimeRange(item.block.start, item.block.end), item.block.location, item.cls.instructor || 'Staff'].filter(Boolean).join(' | ');
       events.appendChild(event);
     }
     day.append(head, events);
@@ -545,6 +592,8 @@ function renderPlannedList() {
       .join('');
 
     const seatsCls = seatsClass(cls.seatsAvailable, cls.seatsTotal);
+    const isRefreshing = singleClassRefreshes.has(cls.id);
+    const refreshLabel = `${isRefreshing ? 'Refreshing' : 'Refresh'} ${cls.courseAbbr} class info`;
 
     let conflictNote = '';
     if (hasFinalConflict) {
@@ -560,6 +609,9 @@ function renderPlannedList() {
           <span class="planned-card-name">${escapeHtml(cls.courseTitle)}</span>
         </div>
         <div class="planned-card-actions">
+          <button type="button" class="btn class-refresh-btn js-refresh-class${isRefreshing ? ' is-refreshing' : ''}" data-id="${escapeHtml(cls.id)}" title="${escapeHtml(refreshLabel)}" aria-label="${escapeHtml(refreshLabel)}" ${isRefreshing ? 'disabled' : ''}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.6 9a7 7 0 0 1 11.6-2.6L20 12M4 12l2.8 5.6A7 7 0 0 0 18.4 15"/></svg>
+          </button>
           <button class="btn btn-small js-details" data-id="${escapeHtml(cls.id)}">Class details</button>
           <button class="btn btn-small js-requirements" data-id="${escapeHtml(cls.id)}">Requirements</button>
           <button class="btn btn-small btn-primary js-open" data-id="${escapeHtml(cls.id)}">Open in TSS</button>
@@ -613,6 +665,9 @@ function renderPlannedList() {
       const cls = planned.find((c) => c.id === id);
       if (cls) openRequirementsModal(cls);
     });
+  });
+  list.querySelectorAll('.js-refresh-class').forEach((btn) => {
+    btn.addEventListener('click', (e) => refreshClassInfo(e.currentTarget.dataset.id));
   });
   list.querySelectorAll('.js-details').forEach((btn) => {
     btn.addEventListener('click', (e) => {
@@ -738,7 +793,11 @@ function updateStoredClass(id, updater) {
 
 function bookingDetailHtml(cls) {
   const info = cls.bookingDetails;
-  if (!info?.events?.length) return '<p class="muted">No booking details are cached yet. Use Refresh all class info to fetch them.</p>';
+  if (!info?.events?.length) {
+    return cls.bookingFetchedAt
+      ? '<p class="muted">No booking options were returned for this section.</p>'
+      : '<p class="muted">No booking details are cached yet.</p>';
+  }
   const sectionRows = cls._lastPkg?.raw || [];
   return info.events.map((cachedEvent) => {
     const event = enrichBookingRooms(cachedEvent, sectionRows);
@@ -758,6 +817,32 @@ function bookingDetailHtml(cls) {
       `).join('')}</ul></div>` : '<p class="muted">No dated meeting information is cached.</p>'}
     </section>`;
   }).join('');
+}
+
+function renderClassDetailsBody(body, classId) {
+  const current = planned.find((item) => item.id === classId);
+  if (!current) return;
+  const schedule = detailScheduleHtml(current.scheduleBlocks || []);
+  body.innerHTML = `<section class="detail-event"><h3>Selected section ${escapeHtml(current.selectedPackageOtjid)}</h3>
+    <div class="detail-grid"><span>Open seats / capacity</span><strong>${escapeHtml(current.seatsAvailable)}/${escapeHtml(current.seatsTotal)}</strong>
+    <span>Total waitlist</span><strong>${escapeHtml(current.waitlistTotal ?? '—')}</strong>
+    <span>Professor</span><strong>${escapeHtml(current.instructor || 'Staff')}</strong>
+    <span>Section status</span><strong>${escapeHtml(current.status || '—')}</strong>
+    <span>Section data checked</span><strong>${escapeHtml(formatTimestamp(current.sectionFetchedAt))}</strong></div>
+    ${schedule ? `<div class="detail-section-list">${schedule}</div>` : '<div class="detail-empty">No schedule information is cached yet.</div>'}
+    ${current.unavailable ? '<p class="req-error">This package is no longer listed. Your saved details are retained.</p>' : ''}
+    ${current.sectionError ? `<p class="req-error">Last section refresh failed: ${escapeHtml(current.sectionError)}</p>` : ''}
+    ${current.unavailable && current.availablePackages?.length ? '<button class="btn js-replace-section">Choose a different section</button>' : ''}</section>
+    <div class="detail-refresh-indicator hidden" role="status"><span class="detail-refresh-label"></span><div class="detail-refresh-track"><span></span></div></div>
+    <section class="detail-booking"><h3>Booking and dated meetings</h3>${bookingDetailHtml(current)}
+      <p class="detail-updated">Booking data checked ${escapeHtml(formatTimestamp(current.bookingFetchedAt))}${current.bookingError ? ` - Last refresh failed: ${escapeHtml(current.bookingError)}` : ''}</p>
+    </section>`;
+  const replaceButton = body.querySelector('.js-replace-section');
+  if (replaceButton) replaceButton.addEventListener('click', () => {
+    const backdrop = body.closest('.modal-backdrop');
+    if (backdrop) backdrop.querySelector('.modal-close').click();
+    openSectionPicker(current, current.availablePackages, termForClass(current), current.id);
+  });
 }
 
 function openClassDetails(cls) {
@@ -783,25 +868,9 @@ function openClassDetails(cls) {
   const keyHandler = (event) => { if (event.key === 'Escape') close(); };
   document.addEventListener('keydown', keyHandler);
   const body = backdrop.querySelector('.detail-body');
-  const schedule = detailScheduleHtml(current.scheduleBlocks || []);
-  body.innerHTML = `<section class="detail-event"><h3>Selected section ${escapeHtml(current.selectedPackageOtjid)}</h3>
-    <div class="detail-grid"><span>Open seats / capacity</span><strong>${escapeHtml(current.seatsAvailable)}/${escapeHtml(current.seatsTotal)}</strong>
-    <span>Total waitlist</span><strong>${escapeHtml(current.waitlistTotal ?? '—')}</strong>
-    <span>Professor</span><strong>${escapeHtml(current.instructor || 'Staff')}</strong>
-    <span>Section status</span><strong>${escapeHtml(current.status || '—')}</strong>
-    <span>Section data checked</span><strong>${escapeHtml(formatTimestamp(current.sectionFetchedAt))}</strong></div>
-    ${schedule ? `<div class="detail-section-list">${schedule}</div>` : '<div class="detail-empty">No schedule information is cached yet.</div>'}
-    ${current.unavailable ? '<p class="req-error">This package is no longer listed. Your saved details are retained.</p>' : ''}
-    ${current.sectionError ? `<p class="req-error">Last section refresh failed: ${escapeHtml(current.sectionError)}</p>` : ''}
-    ${current.unavailable && current.availablePackages?.length ? '<button class="btn js-replace-section">Choose a different section</button>' : ''}</section>
-    <section class="detail-booking"><h3>Booking and dated meetings</h3>${bookingDetailHtml(current)}
-      <p class="detail-updated">Booking data checked ${escapeHtml(formatTimestamp(current.bookingFetchedAt))}${current.bookingError ? ` - Last refresh failed: ${escapeHtml(current.bookingError)}` : ''}</p>
-    </section>`;
-  const replaceButton = body.querySelector('.js-replace-section');
-  if (replaceButton) replaceButton.addEventListener('click', () => {
-    close();
-    openSectionPicker(current, current.availablePackages, termForClass(current), current.id);
-  });
+  const needsBookingRefresh = !current.bookingFetchedAt && !current.bookingDetails?.fetchedAt;
+  renderClassDetailsBody(body, current.id);
+  if (needsBookingRefresh) refreshClassInfo(current.id);
 }
 
 function formatTimestamp(value) {
@@ -816,16 +885,174 @@ function refreshMetaLabel(run) {
   return `Last refresh: ${formatTimestamp(run.startedAt)} (${Math.max(0, run.total - run.errors)}/${run.total} complete)`;
 }
 
-function showRefreshStatus(message, error = false) {
+function showRefreshStatus(message, error = false, progressValue = null) {
   const status = document.getElementById('refresh-status');
   if (!status) return;
-  status.textContent = message;
+  const statusText = document.getElementById('refresh-status-text');
+  if (statusText) statusText.textContent = message;
   status.classList.toggle('hidden', !message);
   status.classList.toggle('danger', error);
+  const progress = document.getElementById('refresh-progress');
+  const fill = document.getElementById('refresh-progress-fill');
+  if (progress && fill) {
+    const hasProgress = progressValue !== null && progressValue !== undefined;
+    const bounded = Math.max(0, Math.min(100, Number(progressValue) || 0));
+    progress.classList.toggle('hidden', !message || !hasProgress);
+    progress.setAttribute('aria-valuenow', String(bounded));
+    fill.style.width = `${bounded}%`;
+  }
+}
+
+function setClassRefreshButton(classId, isRefreshing) {
+  const courseAbbr = planned.find((item) => item.id === classId)?.courseAbbr || 'class';
+  document.querySelectorAll('.js-refresh-class').forEach((button) => {
+    if (button.dataset.id !== classId) return;
+    button.disabled = isRefreshing;
+    button.classList.toggle('is-refreshing', isRefreshing);
+    button.title = `${isRefreshing ? 'Refreshing' : 'Refresh'} ${courseAbbr} class info`;
+    button.setAttribute('aria-label', button.title);
+  });
+}
+
+function setDetailRefreshProgress(classId, active, percent = 0, message = '') {
+  if (selectedDetailId !== classId) return;
+  const indicator = document.querySelector('.details-modal .detail-refresh-indicator');
+  if (!indicator) return;
+  indicator.classList.toggle('hidden', !active);
+  const label = indicator.querySelector('.detail-refresh-label');
+  const fill = indicator.querySelector('.detail-refresh-track span');
+  if (label) label.textContent = message;
+  if (fill) fill.style.width = `${Math.max(0, Math.min(100, Number(percent) || 0))}%`;
+}
+
+async function refreshClassInfo(classId) {
+  if (singleClassRefreshes.has(classId)) {
+    setDetailRefreshProgress(classId, true, 12, `Refreshing ${planned.find((item) => item.id === classId)?.courseAbbr || 'class'}...`);
+    return singleClassRefreshes.get(classId);
+  }
+  if (activeRefreshId || fullRefreshStarting) {
+    setDetailRefreshProgress(classId, true, 0, 'This class is included in the current refresh...');
+    return false;
+  }
+  const initialClass = planned.find((item) => item.id === classId);
+  if (!initialClass) return false;
+  const { lastRefreshRun: otherRun } = await chrome.storage.local.get('lastRefreshRun');
+  if (singleClassRefreshes.has(classId)) return singleClassRefreshes.get(classId);
+  if (activeRefreshId || fullRefreshStarting) {
+    setDetailRefreshProgress(classId, true, 0, 'This class is included in the current refresh...');
+    return false;
+  }
+  if (otherRun?.refreshId && otherRun.startedAt && !otherRun.finishedAt && Date.now() - otherRun.startedAt < 30 * 60 * 1000) {
+    observedRefreshId = otherRun.refreshId;
+    const stopButton = document.getElementById('stop-refresh');
+    const refreshButton = document.getElementById('refresh-all');
+    if (stopButton) {
+      stopButton.classList.remove('hidden');
+      stopButton.disabled = false;
+    }
+    if (refreshButton) refreshButton.disabled = true;
+    setDetailRefreshProgress(classId, true, 0, 'Waiting for the current class refresh...');
+    const progress = otherRun.total ? (otherRun.completed || 0) / otherRun.total * 100 : 0;
+    showRefreshStatus('A class refresh is already running in another planner tab.', false, progress);
+    return false;
+  }
+  const refreshId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const waiting = singleClassRefreshes.size > 0;
+  const task = singleRefreshQueue.catch(() => undefined).then(async () => {
+    setClassRefreshButton(classId, true);
+    setDetailRefreshProgress(classId, true, 8, `Refreshing ${initialClass.courseAbbr}...`);
+    showRefreshStatus(`Refreshing ${initialClass.courseAbbr}...`);
+    const term = termForClass(initialClass);
+    let sectionResult;
+    let bookingResult;
+    try {
+      sectionResult = await chrome.runtime.sendMessage({ type: 'getSections', moduleID: initialClass.moduleID, term, refreshId });
+    } catch (error) {
+      sectionResult = { error: error.message || 'network' };
+    }
+    const packages = !sectionResult?.error ? groupSections(sectionResult.sections || []) : [];
+    const pkg = packages.find((item) => item.otjid === initialClass.selectedPackageOtjid);
+    const sectionRows = pkg?.raw || planned.find((item) => item.id === classId)?._lastPkg?.raw || [];
+    setDetailRefreshProgress(classId, true, 48, 'Refreshing booking and meeting details...');
+    try {
+      bookingResult = await chrome.runtime.sendMessage({
+        type: 'getBookingDetails',
+        moduleID: initialClass.moduleID,
+        eventPkgObjid: pkg?.objid || initialClass.eventPkgObjid,
+        term,
+        refreshId,
+      });
+    } catch (error) {
+      bookingResult = { error: error.message || 'network' };
+    }
+    setDetailRefreshProgress(classId, true, 82, 'Saving refreshed class info...');
+    const now = Date.now();
+    let failed = false;
+    await updateStoredClass(classId, (stored) => {
+      const next = { ...stored };
+      if (sectionResult && !sectionResult.error) {
+        next.sectionFetchedAt = now;
+        next.sectionError = null;
+        next.unavailable = !pkg;
+        next.availablePackages = pkg ? [] : packages.map(({ raw, ...item }) => item);
+        if (pkg) Object.assign(next, {
+          eventPkgObjid: pkg.objid,
+          seatsAvailable: pkg.seatsAvailable,
+          seatsTotal: pkg.seatsTotal,
+          waitlistTotal: pkg.waitlistTotal,
+          instructor: pkg.instructor,
+          status: pkg.status,
+          location: pkg.location,
+          scheduleBlocks: pkg.scheduleBlocks,
+          _lastPkg: pkg,
+        });
+        else failed = true;
+      } else {
+        next.sectionError = [sectionResult?.error, sectionResult?.message].filter(Boolean).join(': ') || 'Section refresh failed';
+        failed = true;
+      }
+      if (bookingResult && !bookingResult.error) {
+        next.bookingFetchedAt = now;
+        next.bookingError = null;
+        next.bookingDetails = { events: normalizeBooking(bookingResult.events, sectionRows), fetchedAt: now };
+      } else {
+        next.bookingError = [bookingResult?.error, bookingResult?.message].filter(Boolean).join(': ') || 'Booking refresh failed';
+        failed = true;
+      }
+      return next;
+    });
+    if (['no-auth', 'auth-expired'].includes(sectionResult?.error) || ['no-auth', 'auth-expired'].includes(bookingResult?.error)) showAuthBanner('expired');
+    await chrome.runtime.sendMessage({ type: 'finishRefresh', refreshId }).catch(() => undefined);
+    const updatedClass = planned.find((item) => item.id === classId);
+    if (selectedDetailId === classId) {
+      const body = document.querySelector('.details-modal .detail-body');
+      if (body) renderClassDetailsBody(body, classId);
+    }
+    setDetailRefreshProgress(classId, true, 100, failed ? 'Refresh finished with errors.' : 'Class info refreshed.');
+    showRefreshStatus(failed ? `Refresh finished with errors for ${initialClass.courseAbbr}.` : `Refreshed ${initialClass.courseAbbr}.`, failed);
+    return !failed && Boolean(updatedClass);
+  }).catch((error) => {
+    showRefreshStatus(`Could not refresh class info: ${error.message || 'unknown error'}`, true);
+    return false;
+  }).finally(() => {
+    singleClassRefreshes.delete(classId);
+    setClassRefreshButton(classId, false);
+    if (selectedDetailId === classId) setDetailRefreshProgress(classId, false);
+  });
+  singleClassRefreshes.set(classId, task);
+  singleRefreshQueue = task.catch(() => undefined);
+  setClassRefreshButton(classId, true);
+  if (waiting) setDetailRefreshProgress(classId, true, 0, 'Waiting for the current class refresh...');
+  return task;
 }
 
 async function refreshAllClasses() {
-  if (activeRefreshId) return;
+  if (activeRefreshId || fullRefreshStarting) return;
+  if (singleClassRefreshes.size) {
+    showRefreshStatus('A class refresh is already running. Try again when it finishes.');
+    return;
+  }
+  fullRefreshStarting = true;
   const { lastRefreshRun: previousRun } = await chrome.storage.local.get('lastRefreshRun');
   if (previousRun?.refreshId && previousRun.startedAt && !previousRun.finishedAt && Date.now() - previousRun.startedAt < 30 * 60 * 1000) {
     observedRefreshId = previousRun.refreshId;
@@ -836,11 +1063,14 @@ async function refreshAllClasses() {
     }
     const refreshButton = document.getElementById('refresh-all');
     if (refreshButton) refreshButton.disabled = true;
-    showRefreshStatus('A class refresh is already running in another planner tab.');
+    const progress = previousRun.total ? (previousRun.completed || 0) / previousRun.total * 100 : 0;
+    showRefreshStatus('A class refresh is already running in another planner tab.', false, progress);
+    fullRefreshStarting = false;
     return;
   }
   if (!planned.length) {
     showRefreshStatus('Add a class before refreshing class info.');
+    fullRefreshStarting = false;
     return;
   }
   const button = document.getElementById('refresh-all');
@@ -849,6 +1079,7 @@ async function refreshAllClasses() {
   const startedAt = Date.now();
   const refreshId = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
   activeRefreshId = refreshId;
+  fullRefreshStarting = false;
   observedRefreshId = null;
   refreshStopRequested = false;
   const run = { refreshId, startedAt, finishedAt: null, total: classes.length, completed: 0, errors: 0 };
@@ -858,12 +1089,13 @@ async function refreshAllClasses() {
     stopButton.classList.remove('hidden');
     stopButton.disabled = false;
   }
+  showRefreshStatus(`Refreshing 1 of ${classes.length}: ${classes[0].courseAbbr}...`, false, 0);
   const sectionCache = new Map();
   let authFailed = false;
   for (let index = 0; index < classes.length; index++) {
     if (refreshStopRequested) break;
     const cls = classes[index];
-    showRefreshStatus(`Refreshing ${index + 1} of ${classes.length}: ${cls.courseAbbr}…`);
+    showRefreshStatus(`Refreshing ${index + 1} of ${classes.length}: ${cls.courseAbbr}...`, false, run.completed / run.total * 100);
     const term = termForClass(cls);
     const cacheKey = `${cls.moduleID}|${term.academicYear}|${term.academicPeriod}`;
     if (!sectionCache.has(cacheKey)) {
@@ -918,6 +1150,7 @@ async function refreshAllClasses() {
     run.completed++;
     if (failed) run.errors++;
     await chrome.storage.local.set({ lastRefreshRun: { ...run } });
+    showRefreshStatus(`Refreshed ${run.completed} of ${run.total} classes.`, false, run.completed / run.total * 100);
   }
   run.finishedAt = Date.now();
   run.cancelled = refreshStopRequested;
@@ -929,7 +1162,8 @@ async function refreshAllClasses() {
   if (authFailed) showAuthBanner('expired');
   showRefreshStatus(refreshStopRequested
     ? `Refresh stopped. ${run.completed} of ${run.total} classes completed.`
-    : `Refresh complete: ${run.completed - run.errors}/${run.total} classes fully refreshed; ${run.errors} need attention.`);
+    : `Refresh complete: ${run.completed - run.errors}/${run.total} classes fully refreshed; ${run.errors} need attention.`, false,
+  run.total ? run.completed / run.total * 100 : 100);
 }
 
 function stopClassRefresh() {
@@ -1384,9 +1618,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadTerm();
   document.getElementById('term-badge').textContent = termBadge(currentTerm);
   const { lastRefreshRun } = await chrome.storage.local.get('lastRefreshRun');
-  showFinals = true;
-  document.getElementById('show-finals').checked = true;
-  document.getElementById('show-finals').disabled = true;
   renderAll();
   const refreshMeta = document.getElementById('refresh-meta');
   if (refreshMeta) refreshMeta.textContent = refreshMetaLabel(lastRefreshRun);
@@ -1411,6 +1642,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (changes.plannedClasses) {
       planned = Array.isArray(changes.plannedClasses.newValue) ? changes.plannedClasses.newValue : [];
       renderAll();
+      if (selectedDetailId && !singleClassRefreshes.has(selectedDetailId)) {
+        const body = document.querySelector('.details-modal .detail-body');
+        if (body) renderClassDetailsBody(body, selectedDetailId);
+      }
     }
     if (changes.currentTerm) {
       currentTerm = changes.currentTerm.newValue || DEFAULT_TERM;
@@ -1419,14 +1654,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (changes.lastRefreshRun) {
       const run = changes.lastRefreshRun.newValue;
       if (refreshMeta && run) refreshMeta.textContent = refreshMetaLabel(run);
-      if (observedRefreshId && run?.refreshId === observedRefreshId && run.finishedAt) {
-        observedRefreshId = null;
-        refreshStopRequested = false;
-        const refreshButton = document.getElementById('refresh-all');
-        const stopButton = document.getElementById('stop-refresh');
-        if (refreshButton) refreshButton.disabled = false;
-        if (stopButton) stopButton.classList.add('hidden');
-        showRefreshStatus(run.cancelled ? 'Refresh stopped in the other planner tab.' : 'Refresh finished in the other planner tab.');
+      if (observedRefreshId && run?.refreshId === observedRefreshId) {
+        const progress = run.total ? (run.completed || 0) / run.total * 100 : 0;
+        if (run.finishedAt) {
+          observedRefreshId = null;
+          refreshStopRequested = false;
+          const refreshButton = document.getElementById('refresh-all');
+          const stopButton = document.getElementById('stop-refresh');
+          if (refreshButton) refreshButton.disabled = false;
+          if (stopButton) stopButton.classList.add('hidden');
+          showRefreshStatus(run.cancelled ? 'Refresh stopped in the other planner tab.' : 'Refresh finished in the other planner tab.', false, progress);
+          if (selectedDetailId) setDetailRefreshProgress(selectedDetailId, false);
+        } else {
+          showRefreshStatus(`Refreshing classes in the other planner tab: ${run.completed || 0}/${run.total}`, false, progress);
+        }
       }
     }
   });

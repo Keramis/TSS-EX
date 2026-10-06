@@ -16,11 +16,14 @@
       </div>
       <div id="term-badge" class="term-badge" title="Current term">—</div>
       <button id="open-planner" class="btn btn-small">Full planner</button>
+    </header>
+
+    <div class="search-row">
       <div class="search-wrap">
         <input id="search-input" type="text" placeholder="Search courses (e.g. PHYS 002C, CSE 12)..." autocomplete="off">
         <button id="search-btn" class="btn btn-primary">Search</button>
       </div>
-    </header>
+    </div>
 
     <div id="auth-banner" class="auth-banner hidden">
       <span class="auth-icon">!</span>
@@ -36,9 +39,6 @@
       <details class="calendar-disclosure" open>
         <summary class="section-head calendar-disclosure-summary">
           <h2>Weekly Calendar</h2>
-          <div class="calendar-controls">
-            <label class="toggle"><input id="show-finals" type="checkbox" checked disabled><span>Show finals</span></label>
-          </div>
         </summary>
       <div id="calendar" class="calendar">
         <div class="time-axis" id="time-axis"></div>
@@ -97,7 +97,10 @@
           <button id="refresh-all" class="btn btn-small">Refresh all class info</button>
         </div>
       </div>
-      <div id="refresh-status" class="refresh-status hidden" role="status"></div>
+      <div id="refresh-status" class="refresh-status hidden" role="status">
+        <span id="refresh-status-text"></span>
+        <div id="refresh-progress" class="refresh-progress hidden" role="progressbar" aria-label="Class refresh progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="refresh-progress-fill"></span></div>
+      </div>
       <div id="planned-list" class="planned-list"></div>
       <section id="finals-section" class="finals-section hidden">
         <h3>Final exams</h3>
