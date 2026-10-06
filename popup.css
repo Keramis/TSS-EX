@@ -293,6 +293,29 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   font-size: 14px;
   font-weight: 600;
 }
+.calendar-disclosure-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.calendar-disclosure-summary::-webkit-details-marker { display: none; }
+.calendar-disclosure-summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 6px solid var(--muted);
+  transition: transform 120ms ease;
+}
+.calendar-disclosure[open] > .calendar-disclosure-summary::before { transform: rotate(90deg); }
+.calendar-disclosure:not([open]) > .calendar-disclosure-summary { margin-bottom: 0; }
+.calendar-disclosure-summary h2 { margin: 0; }
+.calendar-disclosure-summary .calendar-controls { margin-left: auto; }
+.calendar-disclosure-summary:focus-visible { outline: 2px solid var(--ucsd-blue); outline-offset: 2px; }
+.refresh-actions { display: flex; align-items: center; gap: 6px; }
+.btn-stop { color: var(--danger); border-color: #e3a7aa; background: #fff; }
+.btn-stop:hover { background: var(--danger-bg); }
 .count-badge {
   font-size: 11px;
   font-weight: 600;
@@ -320,7 +343,7 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   overflow-y: hidden;
   overflow-x: hidden;
   background: #fff;
-  height: 240px;
+  height: 360px;
 }
 .time-axis {
   flex-shrink: 0;
@@ -382,7 +405,7 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   font-size: 11px;
   color: #fff;
   overflow: hidden;
-  cursor: default;
+  cursor: pointer;
   border-left: 3px solid rgba(0,0,0,0.25);
   box-shadow: 0 1px 2px rgba(0,0,0,0.15);
   z-index: 1;
@@ -391,6 +414,7 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
 }
 .block.le { background: var(--le-color); }
 .block.di { background: var(--di-color); }
+.block:focus-visible { outline: 2px solid var(--ucsd-blue); outline-offset: 1px; z-index: 5; }
 .block-title {
   font-weight: 600;
   white-space: nowrap;
@@ -454,6 +478,23 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
 .finals-section h3 { font-size: 13px; margin-bottom: 6px; }
 .finals-list { display: flex; flex-direction: column; gap: 4px; }
 .final-row { display: grid; grid-template-columns: 130px 190px 150px 1fr; gap: 8px; padding: 6px 8px; background: #fff9e6; border-radius: 4px; font-size: 12px; }
+.final-calendar-section { margin-top: 14px; }
+.final-calendar { display: grid; grid-template-columns: 32px minmax(0, 1fr); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: #fff; }
+.final-time-axis { position: relative; min-width: 0; border-right: 1px solid var(--border); background: #fafbfc; }
+.final-axis-head { height: var(--final-header-height, 24px); border-bottom: 1px solid var(--border); }
+.final-time-label { position: absolute; right: 3px; transform: translateY(-50%); color: var(--muted); font-size: 8px; line-height: 1; }
+.final-day-columns { display: grid; min-width: 0; overflow-x: auto; }
+.final-day-column { min-width: 0; border-right: 1px solid var(--border); }
+.final-day-column:last-child { border-right: 0; }
+.final-day-column.two-finals { background: #fffdf4; }
+.final-day-column.many-finals { background: #fff7f7; }
+.final-day-head { height: var(--final-header-height, 24px); padding: 5px 1px; overflow: hidden; text-align: center; background: #fafbfc; color: var(--ucsd-blue); border-bottom: 1px solid var(--border); font-size: 9px; font-weight: 600; white-space: nowrap; }
+.final-day-events { position: relative; background-image: repeating-linear-gradient(to bottom, transparent 0, transparent calc(var(--final-hour-height, 14px) - 1px), #eef1f4 calc(var(--final-hour-height, 14px) - 1px), #eef1f4 var(--final-hour-height, 14px)); }
+.final-time-block { position: absolute; z-index: 1; box-sizing: border-box; padding: 1px 2px; overflow: hidden; border-right: 1px solid #fff; border-radius: 2px; background: #dbeaf3; color: #174d6b; font-size: 8px; line-height: 1.15; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.final-day-column.two-finals .final-time-block { background: #fff0bc; }
+.final-day-column.many-finals .final-time-block { background: #ffdede; }
+.final-time-block.final-time-conflict { outline: 1px solid #b23b3b; }
+.final-calendar-empty { padding: 6px 0; color: var(--muted); font-size: 11px; }
 .planned-list {
   display: flex;
   flex-direction: column;
@@ -692,22 +733,39 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
 body.full-planner #app { width: min(1320px, calc(100vw - 40px)); min-height: 100vh; margin: 0 auto; }
 body.full-planner .topbar { padding: 14px 20px; }
 body.full-planner .calendar-section { padding: 20px; }
-body.full-planner .calendar { height: 720px; overflow: hidden; }
+body.full-planner .calendar { height: 760px; overflow: hidden; }
 body.full-planner .day-head { padding: 10px 0; }
-body.full-planner .block { padding: 5px 7px; font-size: 12px; }
+body.full-planner .block { padding: 3px 5px; font-size: 11px; }
+body.full-planner .block-time, body.full-planner .block-loc { font-size: 9px; line-height: 1.1; }
 body.full-planner .planned-section { padding: 20px; }
 body.full-planner .planned-card { padding: 14px 16px; }
 body.full-planner .planned-card:hover { border-color: #9db8ca; }
 body.full-planner #open-planner { display: none; }
 .details-modal { width: min(760px, calc(100vw - 32px)); max-height: 88vh; }
-.detail-body { display: flex; flex-direction: column; gap: 14px; }
+.schedule-quicklook-modal { width: min(420px, calc(100vw - 24px)); }
+.detail-body { display: flex; flex-direction: column; gap: 14px; max-height: 65vh; }
 .detail-event { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .detail-event h3 { font-size: 13px; margin-bottom: 8px; color: var(--ucsd-blue); }
-.detail-grid { display: grid; grid-template-columns: minmax(140px, 1fr) 2fr; gap: 6px 12px; font-size: 12px; }
+.detail-event h4 { margin: 0 0 7px; color: var(--ucsd-blue); font-size: 12px; }
+.detail-meetings h5 { margin: 0 0 5px; color: var(--text); font-size: 11px; }
+.detail-meetings ul { display: flex; flex-direction: column; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.detail-meetings li { display: grid; grid-template-columns: minmax(100px, 1fr) auto minmax(80px, 0.7fr) minmax(120px, 1.5fr); gap: 8px; align-items: start; padding: 6px 8px; border-radius: 4px; background: #f7f9fb; }
+.detail-meetings li strong { font-weight: 600; }
+.detail-meetings li span:last-child { color: var(--muted); }
+.detail-grid { display: grid; grid-template-columns: minmax(150px, 1fr) 2fr; gap: 7px 14px; font-size: 12px; }
 .detail-grid span { color: var(--muted); }
 .detail-grid strong { font-weight: 600; }
 .detail-meetings { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
 .detail-updated { color: var(--muted); font-size: 11px; }
+.detail-section-list { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; }
+.detail-section-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; background: #f7f9fb; border-radius: 4px; font-size: 12px; }
+.detail-section-row > span:last-child { min-width: 0; line-height: 1.4; }
+.detail-type-badge { flex: 0 0 auto; min-width: 22px; padding: 2px 5px; border-radius: 10px; text-align: center; font-size: 10px; font-weight: 700; line-height: 1.2; }
+.detail-type-badge.lecture { background: #dff2e4; color: #24633a; }
+.detail-type-badge.discussion { background: #dceaf8; color: #245a91; }
+.detail-type-badge.final { background: #fff0bc; color: #755400; }
+.detail-type-badge.other { background: #e8ebef; color: #48525c; }
+.detail-empty { padding: 10px; color: var(--muted); background: #f7f9fb; border-radius: 4px; font-size: 12px; }
 .muted { color: var(--muted); }
 
 @media (max-width: 900px) {
@@ -715,6 +773,7 @@ body.full-planner #open-planner { display: none; }
   html:has(body.full-planner) { min-width: 0; }
   body.full-planner #app { width: 100%; }
   body.full-planner .topbar { flex-wrap: wrap; }
-  body.full-planner .calendar { height: 720px; }
+  body.full-planner .calendar { height: 760px; }
   body.full-planner .final-row { grid-template-columns: 1fr 1fr; }
+  .detail-meetings li { grid-template-columns: 1fr 1fr; }
 }

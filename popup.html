@@ -33,15 +33,13 @@
     </div>
 
     <section id="calendar-section" class="calendar-section">
-      <div class="section-head">
-        <h2>Weekly Calendar</h2>
-        <div class="calendar-controls">
-          <label class="toggle">
-            <input id="show-finals" type="checkbox">
-            <span>Show finals</span>
-          </label>
-        </div>
-      </div>
+      <details class="calendar-disclosure" open>
+        <summary class="section-head calendar-disclosure-summary">
+          <h2>Weekly Calendar</h2>
+          <div class="calendar-controls">
+            <label class="toggle"><input id="show-finals" type="checkbox" checked disabled><span>Show finals</span></label>
+          </div>
+        </summary>
       <div id="calendar" class="calendar">
         <div class="time-axis" id="time-axis"></div>
         <div class="day-columns" id="day-columns">
@@ -75,6 +73,15 @@
           </div>
         </div>
       </div>
+      </details>
+      <details id="final-calendar-section" class="final-calendar-section calendar-disclosure" open>
+        <summary class="section-head calendar-disclosure-summary"><h2>Final Calendar</h2></summary>
+        <div id="final-calendar" class="final-calendar">
+          <div id="final-time-axis" class="final-time-axis"></div>
+          <div id="final-day-columns" class="final-day-columns"></div>
+        </div>
+        <div id="final-calendar-empty" class="final-calendar-empty">Final dates appear here when class info is available.</div>
+      </details>
     </section>
 
     <div class="source-status">
@@ -85,7 +92,10 @@
     <section id="planned-section" class="planned-section">
       <div class="section-head">
         <h2>Planned Classes <span id="planned-count" class="count-badge">0</span></h2>
-        <button id="refresh-all" class="btn btn-small">Refresh all class info</button>
+        <div class="refresh-actions">
+          <button id="stop-refresh" class="btn btn-small btn-stop hidden" type="button">Stop refresh</button>
+          <button id="refresh-all" class="btn btn-small">Refresh all class info</button>
+        </div>
       </div>
       <div id="refresh-status" class="refresh-status hidden" role="status"></div>
       <div id="planned-list" class="planned-list"></div>

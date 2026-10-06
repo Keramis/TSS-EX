@@ -2,9 +2,11 @@
 // academic term from the page DOM and stores it for the popup to use.
 
 const SEASON_MAP = { Fall: '1', Winter: '2', Spring: '3', Summer: '4' };
+let lastStoredTerm = null;
+let termRefreshTimer = null;
 
 function detectTerm() {
-  const text = document.title || document.body?.innerText || '';
+  const text = `${document.title || ''}\n${document.body?.innerText || ''}`;
   const m = text.match(/(Fall|Winter|Spring|Summer)\s+(\d{4})/i);
   if (!m) return null;
   const season = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
@@ -16,13 +18,25 @@ function detectTerm() {
 
 function storeTerm() {
   const term = detectTerm();
-  if (term) chrome.storage.local.set({ currentTerm: term });
+  if (!term) return;
+  const key = `${term.academicYear}|${term.academicPeriod}`;
+  if (key === lastStoredTerm) return;
+  lastStoredTerm = key;
+  chrome.storage.local.set({ currentTerm: term });
 }
 
-if (document.readyState === 'complete' || document.readyState === 'interactive') {
-  setTimeout(storeTerm, 500);
-} else {
-  window.addEventListener('DOMContentLoaded', () => setTimeout(storeTerm, 500));
+function scheduleTermRefresh() {
+  clearTimeout(termRefreshTimer);
+  termRefreshTimer = setTimeout(storeTerm, 400);
 }
 
-window.addEventListener('load', () => setTimeout(storeTerm, 800));
+if (document.readyState === 'complete' || document.readyState === 'interactive') scheduleTermRefresh();
+else window.addEventListener('DOMContentLoaded', scheduleTermRefresh, { once: true });
+
+window.addEventListener('load', scheduleTermRefresh);
+window.addEventListener('hashchange', scheduleTermRefresh);
+window.addEventListener('popstate', scheduleTermRefresh);
+window.addEventListener('focus', scheduleTermRefresh);
+
+const observer = new MutationObserver(scheduleTermRefresh);
+observer.observe(document.documentElement, { childList: true, characterData: true, subtree: true });

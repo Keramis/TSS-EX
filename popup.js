@@ -4,10 +4,13 @@ const PERIOD_CODE = { '1': 'FA', '2': 'WI', '3': 'SP', '4': 'SU' };
 
 let planned = [];
 let currentTerm = null;
-let showFinals = false;
+let showFinals = true;
 let isPlanner = false;
 let selectedDetailId = null;
-const detailRequests = new Set();
+let authCheckSequence = 0;
+let activeRefreshId = null;
+let observedRefreshId = null;
+let refreshStopRequested = false;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -84,11 +87,11 @@ function parseSched(sched, type) {
     const isFinal = /^final\s+examination/i.test(trimmed);
     // Finals have a date prefix: "Final Examination 12/09/2026 08:00 AM - 10:59 AM In Person @ ..."
     let m = trimmed.match(
-      /^([A-Za-z]{1,2}(?:,\s*[A-Za-z]{1,2})*)\s+(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)\s+In\s+Person\s+@\s+(.+)$/i
+      /^([A-Za-z]{1,2}(?:,\s*[A-Za-z]{1,2})*)\s+(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)(?:\s+(?:(?:In\s+Person|Online|Remote|Hybrid)\s*@\s*)?(.+))?$/i
     );
     if (!m && isFinal) {
       m = trimmed.match(
-        /^Final\s+Examination\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)\s+In\s+Person\s+@\s+(.+)$/i
+        /^Final\s+Examination\s+(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)(?:\s+(?:(?:In\s+Person|Online|Remote|Hybrid)\s*@\s*)?(.+))?$/i
       );
       if (m) {
         // The final date is stored separately and converted to a weekday for display.
@@ -97,7 +100,7 @@ function parseSched(sched, type) {
           finalDate: m[1],
           start: to24h(m[2]),
           end: to24h(m[3]),
-          location: m[4].trim(),
+          location: (m[4] || 'Location unavailable').trim(),
           type: 'FINAL',
           isFinal: true,
         });
@@ -108,7 +111,7 @@ function parseSched(sched, type) {
     const days = m[1].split(',').map((d) => d.trim()).filter(Boolean);
     const start = to24h(m[2]);
     const end = to24h(m[3]);
-    const location = m[4].trim();
+    const location = (m[4] || 'Location unavailable').trim();
     for (const d of days) blocks.push({ day: normalizeDay(d), start, end, location, type });
   }
   return blocks;
@@ -203,17 +206,17 @@ function detectConflicts(classes) {
 // ---------- Calendar ----------
 function calendarLayout() {
   const allBlocks = planned.flatMap((cls) => (cls.scheduleBlocks || []).filter((b) => !b.isFinal));
-  if (!allBlocks.length) return { start: 8, end: 17, hourHeight: isPlanner ? 48 : 18 };
+  if (!allBlocks.length) return { start: 8, end: 17, hourHeight: isPlanner ? 50 : 34 };
   if (isPlanner) {
     const min = Math.min(...allBlocks.map((b) => timeToMinutes(b.start)));
     const max = Math.max(...allBlocks.map((b) => timeToMinutes(b.end)));
-    return { start: Math.min(7, Math.floor(min / 60)), end: Math.max(21, Math.ceil(max / 60)), hourHeight: 48 };
+    return { start: Math.min(7, Math.floor(min / 60)), end: Math.max(21, Math.ceil(max / 60)), hourHeight: 50 };
   }
   const min = Math.min(...allBlocks.map((b) => timeToMinutes(b.start)));
   const max = Math.max(...allBlocks.map((b) => timeToMinutes(b.end)));
   const start = Math.floor(min / 60);
   const end = Math.ceil(max / 60) || start + 1;
-  return { start, end: Math.max(end, start + 1), hourHeight: Math.min(26, 210 / Math.max(1, end - start)) };
+  return { start, end: Math.max(end, start + 1), hourHeight: Math.min(34, 315 / Math.max(1, end - start)) };
 }
 
 function buildTimeAxis(layout) {
@@ -264,8 +267,29 @@ function renderCalendar() {
       const conflictNote = isConflict ? '\n⚠ Schedule overlap' : '';
       const finalNote = isFinalConflict ? '\n⚠ Final exam conflict' : '';
       block.title = `${cls.courseAbbr} ${b.type}\n${minutesToLabel(timeToMinutes(b.start))} - ${minutesToLabel(timeToMinutes(b.end))}\n${b.location}${conflictNote}${finalNote}`;
-      block.textContent = cls.courseAbbr;
-      if (isPlanner) block.title = `${block.title}\n${b.start}-${b.end} · ${b.location}`;
+      const title = document.createElement('div');
+      title.className = 'block-title';
+      title.textContent = cls.courseAbbr;
+      block.appendChild(title);
+      if (isPlanner) {
+        const time = document.createElement('div');
+        time.className = 'block-time';
+        time.textContent = `${minutesToLabel(timeToMinutes(b.start))}–${minutesToLabel(timeToMinutes(b.end))}`;
+        const room = document.createElement('div');
+        room.className = 'block-loc';
+        room.textContent = `${roomLabel(b.location)} · ${cls.instructor || 'Staff'}`;
+        block.append(time, room);
+      }
+      block.tabIndex = 0;
+      block.setAttribute('role', 'button');
+      block.setAttribute('aria-label', `${cls.courseAbbr}, ${minutesToLabel(timeToMinutes(b.start))} to ${minutesToLabel(timeToMinutes(b.end))}`);
+      block.addEventListener('click', () => openScheduleQuicklook(cls, b));
+      block.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openScheduleQuicklook(cls, b);
+        }
+      });
       col.appendChild(block);
     }
   }
@@ -301,6 +325,177 @@ function finalDateLabel(block) {
 
 function finalTimeLabel(block) {
   return `${minutesToLabel(timeToMinutes(block.start))}–${minutesToLabel(timeToMinutes(block.end))}`;
+}
+
+function roomLabel(location) {
+  const match = String(location || '').match(/\bRoom\s+([\w-]+)/i);
+  return match ? `Room ${match[1]}` : String(location || 'Room unavailable');
+}
+
+function openScheduleQuicklook(cls, block) {
+  if (selectedDetailId) return;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.innerHTML = `<div class="modal schedule-quicklook-modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(cls.courseAbbr)} class details">
+    <div class="modal-head"><div class="modal-title">${escapeHtml(cls.courseAbbr)} · ${escapeHtml(cls.courseTitle)}</div><button class="modal-close" aria-label="Close">&times;</button></div>
+    <div class="modal-body">
+      <div class="detail-grid">
+        <span>Professor</span><strong>${escapeHtml(cls.instructor || 'Staff')}</strong>
+        <span>Room</span><strong>${escapeHtml(block.location || 'Room unavailable')}</strong>
+        <span>Time</span><strong>${escapeHtml(minutesToLabel(timeToMinutes(block.start)))} – ${escapeHtml(minutesToLabel(timeToMinutes(block.end)))}</strong>
+        <span>Units</span><strong>${escapeHtml(cls.credits ?? 'Unavailable')}</strong>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-primary js-quicklook-close">Close</button></div>
+  </div>`;
+  document.body.appendChild(backdrop);
+  const keyHandler = (event) => { if (event.key === 'Escape') close(); };
+  const close = () => {
+    document.removeEventListener('keydown', keyHandler);
+    backdrop.remove();
+  };
+  backdrop.querySelector('.modal-close').addEventListener('click', close);
+  backdrop.querySelector('.js-quicklook-close').addEventListener('click', close);
+  backdrop.addEventListener('click', (event) => { if (event.target === backdrop) close(); });
+  document.addEventListener('keydown', keyHandler);
+}
+
+function compactTimeRange(start, end) {
+  const startMinutes = timeToMinutes(start);
+  const endMinutes = timeToMinutes(end);
+  const clock = (minutes) => {
+    const hour = Math.floor(minutes / 60) % 12 || 12;
+    return `${hour}:${String(minutes % 60).padStart(2, '0')}`;
+  };
+  const startSuffix = startMinutes >= 720 ? 'PM' : 'AM';
+  const endSuffix = endMinutes >= 720 ? 'PM' : 'AM';
+  return startSuffix === endSuffix
+    ? `${clock(startMinutes)}–${clock(endMinutes)} ${endSuffix}`
+    : `${clock(startMinutes)} ${startSuffix}–${clock(endMinutes)} ${endSuffix}`;
+}
+
+function groupScheduleBlocks(blocks, includeFinals = true, separateTypes = false) {
+  const groups = new Map();
+  for (const block of blocks || []) {
+    if (block.isFinal && !includeFinals) continue;
+    const key = block.isFinal
+      ? `final|${block.finalDate}|${block.start}|${block.end}|${block.location}`
+      : `${separateTypes ? block.type : ''}|${block.start}|${block.end}|${String(block.location || '').trim()}`;
+    if (!groups.has(key)) groups.set(key, { block, days: new Set() });
+    if (!block.isFinal) groups.get(key).days.add(block.day);
+  }
+  const dayOrder = new Map(DAYS.map((day, index) => [day, index]));
+  return [...groups.values()].map(({ block, days }) => ({
+    block,
+    dayLabel: [...days].sort((a, b) => (dayOrder.get(a) ?? 99) - (dayOrder.get(b) ?? 99)).join(''),
+  }));
+}
+
+function scheduleSummary(blocks, includeFinals = showFinals) {
+  return groupScheduleBlocks(blocks, includeFinals).map(({ block, dayLabel }) => {
+    if (block.isFinal) return `${finalDateLabel(block)} ${compactTimeRange(block.start, block.end)} ${roomLabel(block.location)}`;
+    return `${dayLabel} ${compactTimeRange(block.start, block.end)} ${roomLabel(block.location)}`;
+  });
+}
+
+function detailScheduleHtml(blocks) {
+  const rows = groupScheduleBlocks(blocks, true, true);
+  return rows.map(({ block, dayLabel }) => {
+    const code = block.isFinal ? 'FI' : block.type === 'LE' ? 'L' : block.type;
+    const className = block.isFinal ? 'final' : code === 'L' ? 'lecture' : code === 'DI' ? 'discussion' : 'other';
+    const label = block.isFinal
+      ? `Final exam · ${finalDateLabel(block)} · ${compactTimeRange(block.start, block.end)} · ${block.location}`
+      : `${dayLabel} ${compactTimeRange(block.start, block.end)} · ${block.location}`;
+    return `<div class="detail-section-row"><span class="detail-type-badge ${className}">[${escapeHtml(code)}]</span><span>${escapeHtml(label)}</span></div>`;
+  }).join('');
+}
+
+function renderFinalCalendar() {
+  const axis = document.getElementById('final-time-axis');
+  const columns = document.getElementById('final-day-columns');
+  if (!axis || !columns) return;
+  axis.replaceChildren();
+  columns.replaceChildren();
+  const byDate = new Map();
+  const seen = new Set();
+  for (const cls of planned) {
+    for (const block of cls.scheduleBlocks || []) {
+      if (!block.isFinal || !block.finalDate) continue;
+      const key = `${cls.id}|${block.finalDate}|${block.start}|${block.end}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const date = dateFromFinal(block.finalDate);
+      if (!date) continue;
+      if (!byDate.has(block.finalDate)) byDate.set(block.finalDate, { date, blocks: [] });
+      byDate.get(block.finalDate).blocks.push({ cls, block });
+    }
+  }
+
+  const sortedDates = [...byDate.entries()].sort((a, b) => a[1].date - b[1].date);
+  const allBlocks = sortedDates.flatMap(([, group]) => group.blocks);
+  const empty = document.getElementById('final-calendar-empty');
+  if (empty) empty.classList.toggle('hidden', allBlocks.length > 0);
+  if (!allBlocks.length) return;
+
+  const firstHour = 8;
+  const lastHour = 20;
+  const hourHeight = isPlanner ? 50 : 26;
+  const headerHeight = 24;
+  const bodyHeight = (lastHour - firstHour) * hourHeight;
+  const clockLabel = (hour) => `${hour % 12 || 12}${hour >= 12 ? 'p' : 'a'}`;
+  axis.style.setProperty('--final-header-height', `${headerHeight}px`);
+  axis.style.height = `${headerHeight + bodyHeight}px`;
+  const axisHead = document.createElement('div');
+  axisHead.className = 'final-axis-head';
+  axis.appendChild(axisHead);
+  for (let hour = firstHour; hour <= lastHour; hour += 2) {
+    const label = document.createElement('span');
+    label.className = 'final-time-label';
+    label.style.top = `${headerHeight + (hour - firstHour) * hourHeight}px`;
+    if (hour === lastHour) label.style.transform = 'translateY(-100%)';
+    label.textContent = clockLabel(hour);
+    axis.appendChild(label);
+  }
+
+  columns.style.gridTemplateColumns = `repeat(${sortedDates.length}, minmax(58px, 1fr))`;
+  columns.style.setProperty('--final-hour-height', `${hourHeight}px`);
+  for (const [dateKey, group] of sortedDates) {
+    const day = document.createElement('section');
+    const count = group.blocks.length;
+    day.className = `final-day-column${count === 2 ? ' two-finals' : count >= 3 ? ' many-finals' : ''}`;
+    const head = document.createElement('div');
+    head.className = 'final-day-head';
+    head.textContent = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' }).format(group.date);
+    head.title = finalDateLabel({ finalDate: dateKey });
+    const events = document.createElement('div');
+    events.className = 'final-day-events';
+    events.style.height = `${bodyHeight}px`;
+    const placements = [];
+    for (const item of group.blocks.sort((a, b) => timeToMinutes(a.block.start) - timeToMinutes(b.block.start))) {
+      const start = timeToMinutes(item.block.start);
+      const end = timeToMinutes(item.block.end);
+      let lane = placements.findIndex((placement) => placement.endsAt <= start);
+      if (lane < 0) lane = placements.length;
+      placements[lane] = { endsAt: end };
+      item.lane = lane;
+    }
+    const laneCount = Math.max(1, placements.length);
+    for (const item of group.blocks) {
+      const top = ((timeToMinutes(item.block.start) - firstHour * 60) / 60) * hourHeight;
+      const height = Math.max(((timeToMinutes(item.block.end) - timeToMinutes(item.block.start)) / 60) * hourHeight, 14);
+      const event = document.createElement('div');
+      event.className = `final-time-block${laneCount > 1 ? ' final-time-conflict' : ''}`;
+      event.style.top = `${top}px`;
+      event.style.height = `${height}px`;
+      event.style.left = `${(item.lane / laneCount) * 100}%`;
+      event.style.width = `${100 / laneCount}%`;
+      event.textContent = item.cls.courseAbbr;
+      event.title = `${item.cls.courseAbbr} · ${compactTimeRange(item.block.start, item.block.end)} · ${roomLabel(item.block.location)}`;
+      events.appendChild(event);
+    }
+    day.append(head, events);
+    columns.appendChild(day);
+  }
 }
 
 function renderFinalsList() {
@@ -345,16 +540,8 @@ function renderPlannedList() {
     else if (hasScheduleConflict) cardClass += ' conflict-card';
     card.className = cardClass;
 
-    const scheduleTags = (cls.scheduleBlocks || [])
-      .filter((b) => showFinals || !b.isFinal)
-      .map((b) => {
-        const key = `${cls.id}|${b.day}|${b.start}|${b.end}`;
-        const isBlockConflict = !b.isFinal && conflictBlockKeys.has(key);
-        const label = b.isFinal
-          ? `${finalDateLabel(b)} ${finalTimeLabel(b)} · ${b.location}`
-          : `${b.day} ${b.start}-${b.end} · ${b.location}`;
-        return `<span class="schedule-tag ${String(b.type).toLowerCase()}${isBlockConflict ? ' tag-conflict' : ''}">${escapeHtml(label)}</span>`;
-      })
+    const scheduleTags = scheduleSummary(cls.scheduleBlocks || [])
+      .map((label) => `<span class="schedule-tag">${escapeHtml(label)}</span>`)
       .join('');
 
     const seatsCls = seatsClass(cls.seatsAvailable, cls.seatsTotal);
@@ -437,6 +624,7 @@ function renderPlannedList() {
 
 function renderAll() {
   renderCalendar();
+  renderFinalCalendar();
   renderPlannedList();
 }
 
@@ -452,6 +640,17 @@ function bookingDate(value) {
   }).format(new Date(Number(match[1])));
 }
 
+function bookingDateKey(value) {
+  const raw = String(value || '');
+  const encoded = raw.match(/\/Date\((\d+)/);
+  const date = encoded ? new Date(Number(encoded[1])) : new Date(raw);
+  if (Number.isNaN(date.getTime())) return '';
+  const month = (encoded ? date.getUTCMonth() : date.getMonth()) + 1;
+  const day = encoded ? date.getUTCDate() : date.getDate();
+  const year = encoded ? date.getUTCFullYear() : date.getFullYear();
+  return `${month}/${day}/${year}`;
+}
+
 function durationTime(value) {
   const match = String(value || '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?/);
   if (!match) return value || '';
@@ -462,8 +661,47 @@ function durationTime(value) {
   return `${hour12}:${String(minutes).padStart(2, '0')} ${suffix}`;
 }
 
-function normalizeBooking(events) {
-  return (events || []).map((event) => ({
+function normalizeEventId(value) {
+  return String(value || '').replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+}
+
+function meetingDayCode(value) {
+  const day = String(value || '').trim().toLowerCase().slice(0, 3);
+  return ({ mon: 'M', tue: 'Tu', wed: 'W', thu: 'Th', fri: 'F', sat: 'Sa', sun: 'Su' })[day] || '';
+}
+
+function enrichBookingRooms(event, sectionRows = []) {
+  const eventId = normalizeEventId(event.eventId);
+  if (!eventId) return event;
+  const sectionBlocks = sectionRows
+    .filter((row) => normalizeEventId(row.EventID) === eventId)
+    .flatMap((row) => parseSched(row.Sched, row.TeachingMethod));
+  const rooms = [...new Set(sectionBlocks.map((block) => block.location).filter(Boolean))];
+  const meetings = (event.events || []).map((meeting) => {
+    const start = to24h(meeting.start);
+    const end = to24h(meeting.end);
+    const dayCode = meetingDayCode(meeting.day) || meetingDayCode(meeting.date);
+    let matching = sectionBlocks.filter((block) => !block.isFinal && block.start === start && block.end === end && dayCode && block.day === dayCode);
+    if (!matching.length) {
+      const dateKey = meeting.dateKey || bookingDateKey(meeting.date);
+      matching = sectionBlocks.filter((block) => block.isFinal && block.finalDate === dateKey && block.start === start && block.end === end);
+    }
+    if (!matching.length) matching = sectionBlocks.filter((block) => !block.isFinal && block.start === start && block.end === end);
+    const matchingRooms = [...new Set(matching.map((block) => block.location).filter(Boolean))];
+    return {
+      ...meeting,
+      location: matchingRooms.length ? matchingRooms.join(', ') : meeting.location,
+    };
+  });
+  return {
+    ...event,
+    room: rooms.length ? rooms.join('; ') : event.room,
+    events: meetings,
+  };
+}
+
+function normalizeBooking(events, sectionRows = []) {
+  return (events || []).map((event) => enrichBookingRooms({
     eventId: event.EventId,
     method: event.MethodText || event.Method || 'Class',
     booked: Boolean(event.Booked),
@@ -475,13 +713,14 @@ function normalizeBooking(events) {
     room: event.RoomShort || event.RoomStext || '',
     events: (event.EventSchedule?.results || []).map((schedule) => ({
       date: bookingDate(schedule.EventDate),
+      dateKey: bookingDateKey(schedule.EventDate),
       day: schedule.DayName || '',
       start: durationTime(schedule.StartTime),
       end: durationTime(schedule.EndTime),
       kind: schedule.MeetingTypeText || '',
       location: [event.RoomShort || event.RoomStext, schedule.ScheduleAdditionalInfo].filter(Boolean).join(' · '),
     })),
-  }));
+  }, sectionRows));
 }
 
 function updateStoredClass(id, updater) {
@@ -499,114 +738,69 @@ function updateStoredClass(id, updater) {
 
 function bookingDetailHtml(cls) {
   const info = cls.bookingDetails;
-  if (!info?.events?.length) return '<p class="muted">No booking details have been fetched yet.</p>';
-  return info.events.map((event) => `
+  if (!info?.events?.length) return '<p class="muted">No booking details are cached yet. Use Refresh all class info to fetch them.</p>';
+  const sectionRows = cls._lastPkg?.raw || [];
+  return info.events.map((cachedEvent) => {
+    const event = enrichBookingRooms(cachedEvent, sectionRows);
+    return `
     <section class="detail-event">
-      <h3>${escapeHtml(event.method)}</h3>
+      <h4>${escapeHtml(event.method || 'Booking option')}</h4>
       <div class="detail-grid">
         <span>Booked</span><strong>${event.booked ? 'Yes' : 'No'}</strong>
-        <span>Your waitlist position</span><strong>${escapeHtml(event.waitlistPosition)}</strong>
+        <span>Your waitlist position</span><strong>${escapeHtml(event.waitlistPosition > 0 ? event.waitlistPosition : event.waitlistBooking ? 'Position unavailable' : 'Not waitlisted')}</strong>
         <span>Waitlist booking</span><strong>${event.waitlistBooking ? 'Yes' : 'No'}</strong>
-        <span>Registration state</span><strong>${escapeHtml(event.registrationState)}</strong>
-        <span>Room</span><strong>${escapeHtml(event.room || '—')}</strong>
-        <span>Registration window</span><strong>${escapeHtml(event.registrationBegin)} – ${escapeHtml(event.registrationEnd)}</strong>
+        <span>Registration state</span><strong>${escapeHtml(event.registrationState || 'Unavailable')}</strong>
+        <span>Room</span><strong>${escapeHtml(event.room || 'Unavailable')}</strong>
+        <span>Registration window</span><strong>${escapeHtml([event.registrationBegin, event.registrationEnd].filter(Boolean).join(' – ') || 'Unavailable')}</strong>
       </div>
-      <div class="detail-meetings">${event.events.map((meeting) => `
-        <div>${escapeHtml(meeting.day)} ${escapeHtml(meeting.date)} · ${escapeHtml(meeting.start)}–${escapeHtml(meeting.end)} ${escapeHtml(meeting.kind)} ${escapeHtml(meeting.location)}</div>
-      `).join('')}</div>
-    </section>`).join('');
+      ${event.events?.length ? `<div class="detail-meetings"><h5>Meetings</h5><ul>${event.events.map((meeting) => `
+        <li><strong>${escapeHtml(meeting.day)} ${escapeHtml(meeting.date)}</strong><span>${escapeHtml(meeting.start)}–${escapeHtml(meeting.end)}</span><span>${escapeHtml(meeting.kind || 'Meeting')}</span><span>${escapeHtml(meeting.location || 'Location unavailable')}</span></li>
+      `).join('')}</ul></div>` : '<p class="muted">No dated meeting information is cached.</p>'}
+    </section>`;
+  }).join('');
 }
 
-async function fetchAndStoreClassDetails(classId) {
-  const cls = planned.find((item) => item.id === classId);
-  if (!cls) return { error: 'missing-class' };
-  const term = termForClass(cls);
-  const sectionPromise = chrome.runtime.sendMessage({ type: 'getSections', moduleID: cls.moduleID, term });
-  const bookingPromise = chrome.runtime.sendMessage({
-    type: 'getBookingDetails', moduleID: cls.moduleID, eventPkgObjid: cls.eventPkgObjid, term,
-  });
-  const [sectionResult, bookingResult] = await Promise.allSettled([sectionPromise, bookingPromise]);
-  let sectionError = null;
-  let bookingError = null;
-  let sectionPackages = [];
-  const now = Date.now();
-  await updateStoredClass(classId, (stored) => {
-    const next = { ...stored };
-    if (sectionResult.status === 'fulfilled' && sectionResult.value && !sectionResult.value.error) {
-      sectionPackages = groupSections(sectionResult.value.sections || []);
-      const pkg = sectionPackages.find((item) => item.otjid === stored.selectedPackageOtjid);
-      next.sectionFetchedAt = now;
-      next.sectionError = null;
-      next.unavailable = !pkg;
-      if (pkg) Object.assign(next, {
-        eventPkgObjid: pkg.objid,
-        seatsAvailable: pkg.seatsAvailable,
-        seatsTotal: pkg.seatsTotal,
-        waitlistTotal: pkg.waitlistTotal,
-        instructor: pkg.instructor,
-        status: pkg.status,
-        location: pkg.location,
-        scheduleBlocks: pkg.scheduleBlocks,
-        _lastPkg: pkg,
-      });
-    } else {
-      sectionError = sectionResult.status === 'rejected' ? sectionResult.reason?.message : sectionResult.value?.error;
-      next.sectionError = String(sectionError || 'Section refresh failed');
-    }
-    if (bookingResult.status === 'fulfilled' && !bookingResult.value?.error) {
-      next.bookingFetchedAt = now;
-      next.bookingError = null;
-      next.bookingDetails = { events: normalizeBooking(bookingResult.value.events), fetchedAt: now };
-    } else {
-      bookingError = bookingResult.status === 'rejected' ? bookingResult.reason?.message : bookingResult.value?.error;
-      next.bookingError = String(bookingError || 'Booking refresh failed');
-    }
-    return next;
-  });
-  return { sectionError, bookingError, sectionPackages };
-}
-
-async function openClassDetails(cls) {
-  if (selectedDetailId || detailRequests.has(cls.id)) return;
+function openClassDetails(cls) {
+  if (selectedDetailId) return;
   selectedDetailId = cls.id;
-  detailRequests.add(cls.id);
+  const current = planned.find((item) => item.id === cls.id) || cls;
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
   backdrop.innerHTML = `<div class="modal details-modal">
-    <div class="modal-head"><div class="modal-title">${escapeHtml(cls.courseAbbr)} · ${escapeHtml(cls.courseTitle)}</div><button class="modal-close" aria-label="Close">×</button></div>
-    <div class="modal-body detail-body"><p class="req-loading">Fetching current class and booking details…</p></div>
+    <div class="modal-head"><div class="modal-title">${escapeHtml(current.courseAbbr)} - ${escapeHtml(current.courseTitle)}</div><button class="modal-close" aria-label="Close">&times;</button></div>
+    <div class="modal-body detail-body"></div>
     <div class="modal-foot"><button class="btn btn-primary js-detail-close">Close</button></div>
   </div>`;
   document.body.appendChild(backdrop);
-  const close = () => { selectedDetailId = null; backdrop.remove(); };
+  const close = () => {
+    selectedDetailId = null;
+    document.removeEventListener('keydown', keyHandler);
+    backdrop.remove();
+  };
   backdrop.querySelector('.modal-close').addEventListener('click', close);
   backdrop.querySelector('.js-detail-close').addEventListener('click', close);
   backdrop.addEventListener('click', (event) => { if (event.target === backdrop) close(); });
-  const errors = await fetchAndStoreClassDetails(cls.id);
-  detailRequests.delete(cls.id);
-  if (!backdrop.isConnected) return;
-  if (['no-auth', 'auth-expired'].includes(errors.sectionError) || ['no-auth', 'auth-expired'].includes(errors.bookingError)) showAuthBanner('expired');
-  const current = planned.find((item) => item.id === cls.id) || cls;
+  const keyHandler = (event) => { if (event.key === 'Escape') close(); };
+  document.addEventListener('keydown', keyHandler);
   const body = backdrop.querySelector('.detail-body');
-  const schedule = (current.scheduleBlocks || []).map((block) => block.isFinal
-    ? `<div>${escapeHtml(finalDateLabel(block))} · ${escapeHtml(finalTimeLabel(block))} · ${escapeHtml(block.location)}</div>`
-    : `<div>${escapeHtml(block.day)} · ${escapeHtml(block.start)}–${escapeHtml(block.end)} · ${escapeHtml(block.location)}</div>`).join('');
+  const schedule = detailScheduleHtml(current.scheduleBlocks || []);
   body.innerHTML = `<section class="detail-event"><h3>Selected section ${escapeHtml(current.selectedPackageOtjid)}</h3>
     <div class="detail-grid"><span>Open seats / capacity</span><strong>${escapeHtml(current.seatsAvailable)}/${escapeHtml(current.seatsTotal)}</strong>
     <span>Total waitlist</span><strong>${escapeHtml(current.waitlistTotal ?? '—')}</strong>
-    <span>Instructor</span><strong>${escapeHtml(current.instructor)}</strong><span>Status</span><strong>${escapeHtml(current.status || '—')}</strong>
-    <span>Last section check</span><strong>${escapeHtml(formatTimestamp(current.sectionFetchedAt))}</strong></div>
-    <div class="detail-meetings">${schedule || 'No schedule information available.'}</div>
+    <span>Professor</span><strong>${escapeHtml(current.instructor || 'Staff')}</strong>
+    <span>Section status</span><strong>${escapeHtml(current.status || '—')}</strong>
+    <span>Section data checked</span><strong>${escapeHtml(formatTimestamp(current.sectionFetchedAt))}</strong></div>
+    ${schedule ? `<div class="detail-section-list">${schedule}</div>` : '<div class="detail-empty">No schedule information is cached yet.</div>'}
     ${current.unavailable ? '<p class="req-error">This package is no longer listed. Your saved details are retained.</p>' : ''}
-    ${current.unavailable && errors.sectionPackages.length ? '<button class="btn js-replace-section">Choose a different section</button>' : ''}
-    ${errors.sectionError ? `<p class="req-error">Section request failed: ${escapeHtml(errors.sectionError)}</p>` : ''}</section>
-    ${bookingDetailHtml(current)}
-    <p class="detail-updated">Booking checked ${escapeHtml(formatTimestamp(current.bookingFetchedAt))}${errors.bookingError ? ` · Request failed: ${escapeHtml(errors.bookingError)}` : ''}</p>`;
+    ${current.sectionError ? `<p class="req-error">Last section refresh failed: ${escapeHtml(current.sectionError)}</p>` : ''}
+    ${current.unavailable && current.availablePackages?.length ? '<button class="btn js-replace-section">Choose a different section</button>' : ''}</section>
+    <section class="detail-booking"><h3>Booking and dated meetings</h3>${bookingDetailHtml(current)}
+      <p class="detail-updated">Booking data checked ${escapeHtml(formatTimestamp(current.bookingFetchedAt))}${current.bookingError ? ` - Last refresh failed: ${escapeHtml(current.bookingError)}` : ''}</p>
+    </section>`;
   const replaceButton = body.querySelector('.js-replace-section');
   if (replaceButton) replaceButton.addEventListener('click', () => {
-    const term = termForClass(current);
     close();
-    openSectionPicker(current, errors.sectionPackages, term, current.id);
+    openSectionPicker(current, current.availablePackages, termForClass(current), current.id);
   });
 }
 
@@ -618,6 +812,7 @@ function formatTimestamp(value) {
 function refreshMetaLabel(run) {
   if (!run?.startedAt) return 'Class details have not been refreshed yet.';
   if (!run.finishedAt) return `Refresh started ${formatTimestamp(run.startedAt)} (${run.completed || 0}/${run.total} in progress)`;
+  if (run.cancelled) return `Refresh stopped ${formatTimestamp(run.finishedAt)} (${run.completed || 0}/${run.total} classes completed)`;
   return `Last refresh: ${formatTimestamp(run.startedAt)} (${Math.max(0, run.total - run.errors)}/${run.total} complete)`;
 }
 
@@ -630,8 +825,17 @@ function showRefreshStatus(message, error = false) {
 }
 
 async function refreshAllClasses() {
+  if (activeRefreshId) return;
   const { lastRefreshRun: previousRun } = await chrome.storage.local.get('lastRefreshRun');
-  if (previousRun?.startedAt && !previousRun.finishedAt && Date.now() - previousRun.startedAt < 30 * 60 * 1000) {
+  if (previousRun?.refreshId && previousRun.startedAt && !previousRun.finishedAt && Date.now() - previousRun.startedAt < 30 * 60 * 1000) {
+    observedRefreshId = previousRun.refreshId;
+    const stopButton = document.getElementById('stop-refresh');
+    if (stopButton) {
+      stopButton.classList.remove('hidden');
+      stopButton.disabled = false;
+    }
+    const refreshButton = document.getElementById('refresh-all');
+    if (refreshButton) refreshButton.disabled = true;
     showRefreshStatus('A class refresh is already running in another planner tab.');
     return;
   }
@@ -640,55 +844,73 @@ async function refreshAllClasses() {
     return;
   }
   const button = document.getElementById('refresh-all');
+  const stopButton = document.getElementById('stop-refresh');
   const classes = [...planned];
   const startedAt = Date.now();
-  const run = { startedAt, finishedAt: null, total: classes.length, completed: 0, errors: 0 };
+  const refreshId = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
+  activeRefreshId = refreshId;
+  observedRefreshId = null;
+  refreshStopRequested = false;
+  const run = { refreshId, startedAt, finishedAt: null, total: classes.length, completed: 0, errors: 0 };
   await chrome.storage.local.set({ lastRefreshRun: run });
   if (button) button.disabled = true;
+  if (stopButton) {
+    stopButton.classList.remove('hidden');
+    stopButton.disabled = false;
+  }
   const sectionCache = new Map();
   let authFailed = false;
   for (let index = 0; index < classes.length; index++) {
+    if (refreshStopRequested) break;
     const cls = classes[index];
     showRefreshStatus(`Refreshing ${index + 1} of ${classes.length}: ${cls.courseAbbr}…`);
     const term = termForClass(cls);
     const cacheKey = `${cls.moduleID}|${term.academicYear}|${term.academicPeriod}`;
     if (!sectionCache.has(cacheKey)) {
       try {
-        sectionCache.set(cacheKey, await chrome.runtime.sendMessage({ type: 'getSections', moduleID: cls.moduleID, term }));
+        sectionCache.set(cacheKey, await chrome.runtime.sendMessage({ type: 'getSections', moduleID: cls.moduleID, term, refreshId }));
       } catch (error) {
         sectionCache.set(cacheKey, { error: error.message || 'network' });
       }
     }
     const sectionResult = sectionCache.get(cacheKey);
+    if (sectionResult?.error === 'cancelled') refreshStopRequested = true;
+    if (refreshStopRequested) break;
     const bookingResult = await chrome.runtime.sendMessage({
-      type: 'getBookingDetails', moduleID: cls.moduleID, eventPkgObjid: cls.eventPkgObjid, term,
+      type: 'getBookingDetails', moduleID: cls.moduleID, eventPkgObjid: cls.eventPkgObjid, term, refreshId,
     }).catch((error) => ({ error: error.message || 'network' }));
+    if (bookingResult?.error === 'cancelled') refreshStopRequested = true;
+    if (refreshStopRequested) break;
     const now = Date.now();
     if (['no-auth', 'auth-expired'].includes(sectionResult?.error) || ['no-auth', 'auth-expired'].includes(bookingResult?.error)) authFailed = true;
     let failed = false;
     await updateStoredClass(cls.id, (stored) => {
       const next = { ...stored };
+      let sectionRows = stored._lastPkg?.raw || [];
       if (sectionResult && !sectionResult.error) {
-        const pkg = groupSections(sectionResult.sections || []).find((item) => item.otjid === stored.selectedPackageOtjid);
+        const packages = groupSections(sectionResult.sections || []);
+        const pkg = packages.find((item) => item.otjid === stored.selectedPackageOtjid);
         next.sectionFetchedAt = now;
         next.sectionError = null;
         next.unavailable = !pkg;
+        next.availablePackages = pkg ? [] : packages.map(({ raw, ...item }) => item);
         if (pkg) Object.assign(next, {
           eventPkgObjid: pkg.objid, seatsAvailable: pkg.seatsAvailable, seatsTotal: pkg.seatsTotal,
           waitlistTotal: pkg.waitlistTotal, instructor: pkg.instructor, status: pkg.status,
           location: pkg.location, scheduleBlocks: pkg.scheduleBlocks, _lastPkg: pkg,
         });
+        if (pkg) sectionRows = pkg.raw || [];
         else failed = true;
       } else {
-        next.sectionError = sectionResult.error;
+        next.sectionError = [sectionResult?.error, sectionResult?.message].filter(Boolean).join(': ') || 'Section refresh failed';
         failed = true;
       }
       if (!bookingResult?.error) {
         next.bookingFetchedAt = now;
         next.bookingError = null;
-        next.bookingDetails = { events: normalizeBooking(bookingResult.events), fetchedAt: now };
+        next.bookingDetails = { events: normalizeBooking(bookingResult.events, sectionRows), fetchedAt: now };
       } else {
-        next.bookingError = bookingResult.error;
+        next.bookingError = [bookingResult.error, bookingResult.message].filter(Boolean).join(': ');
         failed = true;
       }
       return next;
@@ -698,10 +920,37 @@ async function refreshAllClasses() {
     await chrome.storage.local.set({ lastRefreshRun: { ...run } });
   }
   run.finishedAt = Date.now();
+  run.cancelled = refreshStopRequested;
   await chrome.storage.local.set({ lastRefreshRun: run });
+  chrome.runtime.sendMessage({ type: 'finishRefresh', refreshId }).catch(() => undefined);
   if (button) button.disabled = false;
+  if (stopButton) stopButton.classList.add('hidden');
+  activeRefreshId = null;
   if (authFailed) showAuthBanner('expired');
-  showRefreshStatus(`Refresh complete: ${run.completed - run.errors}/${run.total} classes fully refreshed; ${run.errors} need attention.`);
+  showRefreshStatus(refreshStopRequested
+    ? `Refresh stopped. ${run.completed} of ${run.total} classes completed.`
+    : `Refresh complete: ${run.completed - run.errors}/${run.total} classes fully refreshed; ${run.errors} need attention.`);
+}
+
+function stopClassRefresh() {
+  const refreshId = activeRefreshId || observedRefreshId;
+  if (!refreshId || refreshStopRequested) return;
+  const stoppingRemoteRun = !activeRefreshId && observedRefreshId === refreshId;
+  refreshStopRequested = true;
+  const stopButton = document.getElementById('stop-refresh');
+  if (stopButton) stopButton.disabled = true;
+  showRefreshStatus('Stopping the current request…');
+  chrome.runtime.sendMessage({ type: 'cancelRefresh', refreshId }).then(async () => {
+    if (!stoppingRemoteRun) return;
+    const { lastRefreshRun } = await chrome.storage.local.get('lastRefreshRun');
+    if (lastRefreshRun?.refreshId !== refreshId) return;
+    if (lastRefreshRun.finishedAt) {
+      chrome.runtime.sendMessage({ type: 'finishRefresh', refreshId }).catch(() => undefined);
+      return;
+    }
+    const run = { ...lastRefreshRun, finishedAt: Date.now(), cancelled: true };
+    await chrome.storage.local.set({ lastRefreshRun: run });
+  }).catch(() => undefined);
 }
 
 // ---------- Auth banner ----------
@@ -709,7 +958,9 @@ function showAuthBanner(mode, extra) {
   const banner = document.getElementById('auth-banner');
   const text = document.getElementById('auth-text');
   banner.classList.remove('hidden', 'danger');
-  if (mode === 'expired') {
+  if (mode === 'checking') {
+    text.textContent = 'Checking TSS connection...';
+  } else if (mode === 'expired') {
     banner.classList.add('danger');
     text.textContent = 'Your TSS session has expired. Log into TSS again to fetch class info. Your planned classes are preserved.';
   } else if (mode === 'not-connected') {
@@ -773,13 +1024,21 @@ function renderSearchLoading() {
   showSearchResults(true);
 }
 
+function normalizeSearchQuery(value) {
+  const query = String(value || '').trim();
+  const match = query.match(/^([a-z]+)\s*-?\s*(\d{1,3})([a-z]?)$/i);
+  if (!match) return query;
+  return `${match[1].toUpperCase()}-${match[2].padStart(3, '0')}${match[3].toUpperCase()}`;
+}
+
 async function doSearch() {
   const input = document.getElementById('search-input');
-  const q = input.value.trim();
+  const q = normalizeSearchQuery(input.value);
   if (!q) {
     showSearchResults(false);
     return;
   }
+  input.value = q;
   await loadTerm();
   renderSearchLoading();
   let resp;
@@ -1075,6 +1334,7 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
       bookingDetails: null,
       bookingFetchedAt: null,
       bookingError: null,
+      availablePackages: [],
       unavailable: false,
       addedAt: existing?.addedAt || Date.now(),
     };
@@ -1091,7 +1351,14 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
 
 // ---------- Init ----------
 async function checkAuth() {
-  const status = await chrome.runtime.sendMessage({ type: 'getSessionStatus' });
+  const request = ++authCheckSequence;
+  let status;
+  try {
+    status = await chrome.runtime.sendMessage({ type: 'getSessionStatus' });
+  } catch {
+    status = null;
+  }
+  if (request !== authCheckSequence) return;
   if (!status?.connected) {
     showAuthBanner('not-connected');
   } else {
@@ -1102,16 +1369,25 @@ async function checkAuth() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.auth) checkAuth();
+  });
+  window.addEventListener('focus', checkAuth);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkAuth();
+  });
+  showAuthBanner('checking');
+  checkAuth();
+
   isPlanner = document.body.classList.contains('full-planner');
   planned = await loadPlanned();
   await loadTerm();
   document.getElementById('term-badge').textContent = termBadge(currentTerm);
-  const { settings, lastRefreshRun } = await chrome.storage.local.get(['settings', 'lastRefreshRun']);
-  showFinals = Boolean(settings?.showFinals);
-  document.getElementById('show-finals').checked = showFinals;
+  const { lastRefreshRun } = await chrome.storage.local.get('lastRefreshRun');
+  showFinals = true;
+  document.getElementById('show-finals').checked = true;
+  document.getElementById('show-finals').disabled = true;
   renderAll();
-  checkAuth();
-
   const refreshMeta = document.getElementById('refresh-meta');
   if (refreshMeta) refreshMeta.textContent = refreshMetaLabel(lastRefreshRun);
 
@@ -1122,19 +1398,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (isPlanner) refreshAllClasses();
     else chrome.tabs.create({ url: `${chrome.runtime.getURL('planner.html')}?refresh=all` });
   });
+  const stopButton = document.getElementById('stop-refresh');
+  if (stopButton) stopButton.addEventListener('click', stopClassRefresh);
 
   const input = document.getElementById('search-input');
   const searchBtn = document.getElementById('search-btn');
   searchBtn.addEventListener('click', doSearch);
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
-
-  const showFinalsEl = document.getElementById('show-finals');
-  showFinalsEl.addEventListener('change', async () => {
-    showFinals = showFinalsEl.checked;
-    const latest = await chrome.storage.local.get('settings');
-    await chrome.storage.local.set({ settings: { ...(latest.settings || {}), showFinals } });
-    renderAll();
-  });
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
@@ -1142,16 +1412,23 @@ document.addEventListener('DOMContentLoaded', async () => {
       planned = Array.isArray(changes.plannedClasses.newValue) ? changes.plannedClasses.newValue : [];
       renderAll();
     }
-    if (changes.settings) {
-      showFinals = Boolean(changes.settings.newValue?.showFinals);
-      showFinalsEl.checked = showFinals;
-      renderAll();
+    if (changes.currentTerm) {
+      currentTerm = changes.currentTerm.newValue || DEFAULT_TERM;
+      document.getElementById('term-badge').textContent = termBadge(currentTerm);
     }
     if (changes.lastRefreshRun) {
       const run = changes.lastRefreshRun.newValue;
       if (refreshMeta && run) refreshMeta.textContent = refreshMetaLabel(run);
+      if (observedRefreshId && run?.refreshId === observedRefreshId && run.finishedAt) {
+        observedRefreshId = null;
+        refreshStopRequested = false;
+        const refreshButton = document.getElementById('refresh-all');
+        const stopButton = document.getElementById('stop-refresh');
+        if (refreshButton) refreshButton.disabled = false;
+        if (stopButton) stopButton.classList.add('hidden');
+        showRefreshStatus(run.cancelled ? 'Refresh stopped in the other planner tab.' : 'Refresh finished in the other planner tab.');
+      }
     }
-    if (changes.auth) checkAuth();
   });
 
   if (isPlanner && new URLSearchParams(location.search).get('refresh') === 'all') {
