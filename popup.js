@@ -515,43 +515,67 @@ function renderFinalCalendar() {
     axis.appendChild(label);
   }
 
-  columns.style.gridTemplateColumns = `repeat(${sortedDates.length}, minmax(128px, 1fr))`;
-  columns.style.setProperty('--final-hour-height', `${hourHeight}px`);
+  // Build a contiguous list of days across the full finals window so students
+  // can see day-gaps between exams rather than only days that have finals.
+  const finalDays = sortedDates.map(([, group]) => group.date);
+  const windowStart = new Date(finalDays[0]);
+  windowStart.setHours(0, 0, 0, 0);
+  const windowEnd = new Date(finalDays[finalDays.length - 1]);
+  windowEnd.setHours(0, 0, 0, 0);
+  // Map midnight-timestamp -> finalDate string key so we can look up groups
+  // for each day in the window regardless of the source string's zero-padding.
+  const finalDateKeyByTimestamp = new Map();
   for (const [dateKey, group] of sortedDates) {
+    const ts = new Date(group.date.getFullYear(), group.date.getMonth(), group.date.getDate()).getTime();
+    finalDateKeyByTimestamp.set(ts, dateKey);
+  }
+  const allDays = [];
+  for (let d = new Date(windowStart); d <= windowEnd; d.setDate(d.getDate() + 1)) {
+    allDays.push(new Date(d));
+  }
+
+  columns.style.gridTemplateColumns = `repeat(${allDays.length}, minmax(128px, 1fr))`;
+  columns.style.setProperty('--final-hour-height', `${hourHeight}px`);
+  for (const dayDate of allDays) {
+    const ts = new Date(dayDate.getFullYear(), dayDate.getMonth(), dayDate.getDate()).getTime();
+    const dateKey = finalDateKeyByTimestamp.get(ts);
+    const group = dateKey ? byDate.get(dateKey) : null;
     const day = document.createElement('section');
-    const count = group.blocks.length;
-    day.className = `final-day-column${count === 2 ? ' two-finals' : count >= 3 ? ' many-finals' : ''}`;
+    const count = group ? group.blocks.length : 0;
+    day.className = `final-day-column${count === 0 ? ' no-finals' : count === 2 ? ' two-finals' : count >= 3 ? ' many-finals' : ''}`;
     const head = document.createElement('div');
     head.className = 'final-day-head';
-    head.textContent = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' }).format(group.date);
-    head.title = finalDateLabel({ finalDate: dateKey });
+    head.textContent = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' }).format(dayDate);
+    if (group) head.title = finalDateLabel({ finalDate: dateKey });
     const events = document.createElement('div');
     events.className = 'final-day-events';
     events.style.height = `${bodyHeight}px`;
-    const finalEntries = assignOverlapLanes(group.blocks.map((item) => ({ item, block: item.block })));
-    for (const placement of finalEntries) {
-      const { item, lane, laneCount } = placement;
-      const top = ((timeToMinutes(item.block.start) - firstHour * 60) / 60) * hourHeight;
-      const height = Math.max(((timeToMinutes(item.block.end) - timeToMinutes(item.block.start)) / 60) * hourHeight, 14);
-      const event = document.createElement('div');
-      event.className = `final-time-block${laneCount > 1 ? ' final-time-conflict' : ''}`;
-      event.style.top = `${top}px`;
-      event.style.height = `${height}px`;
-      event.style.left = `${(lane / laneCount) * 100}%`;
-      event.style.width = `${100 / laneCount}%`;
-      const course = document.createElement('span');
-      course.className = 'final-block-course';
-      course.textContent = item.cls.courseAbbr;
-      const time = document.createElement('span');
-      time.className = 'final-block-time';
-      time.textContent = compactTimeRange(item.block.start, item.block.end);
-      const details = document.createElement('span');
-      details.className = 'final-block-details';
-      details.textContent = `${item.block.location || 'Room unavailable'} | ${item.cls.instructor || 'Staff'}`;
-      event.append(course, time, details);
-      event.title = `${item.cls.courseAbbr} · ${compactTimeRange(item.block.start, item.block.end)} · ${roomLabel(item.block.location)}`;
-      event.title = [item.cls.courseAbbr, item.cls.courseTitle, compactTimeRange(item.block.start, item.block.end), item.block.location, item.cls.instructor || 'Staff'].filter(Boolean).join(' | ');
-      events.appendChild(event);
+    if (group) {
+      const finalEntries = assignOverlapLanes(group.blocks.map((item) => ({ item, block: item.block })));
+      for (const placement of finalEntries) {
+        const { item, lane, laneCount } = placement;
+        const top = ((timeToMinutes(item.block.start) - firstHour * 60) / 60) * hourHeight;
+        const height = Math.max(((timeToMinutes(item.block.end) - timeToMinutes(item.block.start)) / 60) * hourHeight, 14);
+        const event = document.createElement('div');
+        event.className = `final-time-block${laneCount > 1 ? ' final-time-conflict' : ''}`;
+        event.style.top = `${top}px`;
+        event.style.height = `${height}px`;
+        event.style.left = `${(lane / laneCount) * 100}%`;
+        event.style.width = `${100 / laneCount}%`;
+        const course = document.createElement('span');
+        course.className = 'final-block-course';
+        course.textContent = item.cls.courseAbbr;
+        const time = document.createElement('span');
+        time.className = 'final-block-time';
+        time.textContent = compactTimeRange(item.block.start, item.block.end);
+        const details = document.createElement('span');
+        details.className = 'final-block-details';
+        details.textContent = `${item.block.location || 'Room unavailable'} | ${item.cls.instructor || 'Staff'}`;
+        event.append(course, time, details);
+        event.title = `${item.cls.courseAbbr} · ${compactTimeRange(item.block.start, item.block.end)} · ${roomLabel(item.block.location)}`;
+        event.title = [item.cls.courseAbbr, item.cls.courseTitle, compactTimeRange(item.block.start, item.block.end), item.block.location, item.cls.instructor || 'Staff'].filter(Boolean).join(' | ');
+        events.appendChild(event);
+      }
     }
     day.append(head, events);
     columns.appendChild(day);
@@ -1204,17 +1228,31 @@ function stopClassRefresh() {
 function showAuthBanner(mode, extra) {
   const banner = document.getElementById('auth-banner');
   const text = document.getElementById('auth-text');
+  const button = document.getElementById('reauth-btn');
   banner.classList.remove('hidden', 'danger');
+  button.classList.toggle('hidden', ['checking', 'verifying'].includes(mode));
+  button.textContent = mode === 'pending' ? 'Open sign-in' : 'Re-auth';
   if (mode === 'checking') {
     text.textContent = 'Checking TSS connection...';
+  } else if (mode === 'pending') {
+    text.textContent = 'Finish SIS/UCSD sign-in in the browser window and approve Duo.';
+  } else if (mode === 'verifying') {
+    text.textContent = 'Checking the new TSS session...';
+  } else if (mode === 'failed') {
+    banner.classList.add('danger');
+    text.textContent = extra
+      ? `Re-auth failed: ${extra}. Use Re-auth to try again.`
+      : 'Could not use the TSS session. Use Re-auth to try again.';
+  } else if (mode === 'cancelled') {
+    text.textContent = 'Sign-in window closed before TSS connected. Use Re-auth to try again.';
   } else if (mode === 'expired') {
     banner.classList.add('danger');
-    text.textContent = 'Your TSS session has expired. Log into TSS again to fetch class info. Your planned classes are preserved.';
+    text.textContent = 'Your TSS session has expired. Use Re-auth to fetch class info. Your planned classes are preserved.';
   } else if (mode === 'not-connected') {
-    text.textContent = 'Not connected to TSS. Open TSS and log in to capture your session; your planned classes are kept.';
+    text.textContent = 'Not connected to TSS. Use Re-auth to sign in; your planned classes are kept.';
   } else {
     banner.classList.add('danger');
-    text.textContent = `Search failed: ${extra || 'unknown error'}. Log into TSS and try again.`;
+    text.textContent = `Search failed: ${extra || 'unknown error'}. Use Re-auth if your TSS session expired.`;
   }
 }
 
@@ -1606,18 +1644,28 @@ async function checkAuth() {
     status = null;
   }
   if (request !== authCheckSequence) return;
-  if (!status?.connected) {
-    showAuthBanner('not-connected');
-  } else {
+  if (status?.reauthPhase === 'pending' || status?.reauthPhase === 'verifying') {
+    showAuthBanner(status.reauthPhase);
+  } else if (status?.connected) {
     hideAuthBanner();
+  } else if (status?.reauthPhase === 'failed' || status?.reauthPhase === 'cancelled') {
+    showAuthBanner(status.reauthPhase, status.reauthError);
+  } else if (status?.error === 'auth-expired') {
+    showAuthBanner('expired');
+  } else if (status?.error === 'no-auth') {
+    showAuthBanner('not-connected');
+  } else if (status?.error) {
+    showAuthBanner('failed');
+  } else {
+    showAuthBanner('not-connected');
   }
   const capture = document.getElementById('capture-meta');
-  if (capture) capture.textContent = `Last TSS session capture: ${formatTimestamp(status?.capturedAt)}`;
+  if (capture) capture.textContent = `${status?.connected ? 'Connected to TSS' : 'Not connected to TSS'} · Last session capture: ${formatTimestamp(status?.capturedAt)}`;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.auth) checkAuth();
+    if ((area === 'local' && changes.auth) || (area === 'session' && (changes.reauthFlow || changes.authFault))) checkAuth();
   });
   window.addEventListener('focus', checkAuth);
   document.addEventListener('visibilitychange', () => {
@@ -1625,6 +1673,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   showAuthBanner('checking');
   checkAuth();
+
+  document.getElementById('reauth-btn').addEventListener('click', async () => {
+    showAuthBanner('pending');
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'startReauth' });
+      if (!['pending', 'verifying'].includes(result?.phase)) {
+        showAuthBanner('failed', result?.detail || result?.error || 'No response from the background worker; reload the extension and try again');
+      }
+    } catch (error) {
+      showAuthBanner('failed', error?.message || 'Could not contact the background worker');
+    }
+  });
 
   isPlanner = document.body.classList.contains('full-planner');
   planned = await loadPlanned();

@@ -5,6 +5,7 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 ## Entry points
 
 - `manifest.json` — extension manifest; no build step, plain JS, no dependencies.
+- `package-extension.ps1` — creates a ZIP from an explicit list of runtime files, excluding HAR captures and other workspace notes.
 - `background.js` — MV3 service worker (`"type": "module"`), registered at manifest.json:8.
 - `content.js` — content script injected on `https://tss.ucsd.edu/fiori*` (manifest.json:12-17).
 - `popup.html` — toolbar popup (`action.default_popup`, manifest.json:18-21); loads `popup.js` + `popup.css`; loads `theme-boot.js` in `<head>` before body to apply the saved theme without a flash.
@@ -28,17 +29,19 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 
 ### background.js
 - `captureAuthHeaders` (background.js:17) — serialized by `authCaptureQueue`; merges new headers with previous and writes storage key `auth` only when changed or ≥5s since last write.
-- Auth capture listener (background.js:76-89) — `chrome.webRequest.onBeforeSendHeaders` on `https://tss.ucsd.edu/sap/*`; extracts `cookie`, `sap-passport`, `x-csrf-token`.
+- Auth capture listener — `chrome.webRequest.onBeforeSendHeaders` on `https://tss.ucsd.edu/sap/*`; extracts `cookie`, `sap-passport`, `x-csrf-token`, clearing old auxiliary headers when the cookie changes.
+- Re-auth — `startReauth` opens or focuses a 600×800 Chrome popup at `https://sis.ucsd.edu/`, allowing SIS and TSS to create a fresh SAML request before UCSD sign-in and Duo. `finishReauth` waits for the TSS SAML callback or a real Fiori document, verifies a read-only OData response, fetches a fresh CSRF token when needed, then closes the window. Window ID, tab ID, flow phase, and the last API failure live in `chrome.storage.session`, without credentials.
 - Refresh-request lifecycle: `createRefreshRequest` / `cancelRefresh` / `finishRefresh` (background.js:35-73) — per-`refreshId` AbortControllers, 45s timeout, distinguishes `cancelled` vs `timeout` aborts.
 - `searchClasses(term, query)` (background.js:160) — OData v4 `$batch` POST (multipart/mixed) against `MODULE_BASE`; parses via `parseBatchResponse` (background.js:136); dedupes by `ModuleID`; `$top=30`.
 - `getSections(moduleID, term, refreshId)` (background.js:234) — GET `YUCSD_CON_MODULE(...)/_sections`, `$top=1000`; validates all IDs are numeric.
 - `getBookingDetails` (background.js:339) — wraps `fetchBookingDetails` (background.js:287) in `bookingRequestQueue`, enforcing ≥1200ms spacing between booking requests (background.js:342).
 - `getRequirements(moduleID)` (background.js:360) — `$batch` GET `YUCSD_I_PREREQ_TREE(moduleid='<id>',keydate=YYYY-MM-DD)/Set`.
-- Message router (background.js:414-445) — handles `searchClasses`, `getSections`, `getBookingDetails`, `cancelRefresh`, `finishRefresh`, `getRequirements`, `getSessionStatus`.
-- Error contract: every API fn returns `{ error }` with `no-auth` / `auth-expired` (401/403/302) / `http` / `network` / `parse` / `cancelled` / `timeout`; UI keys off these strings.
+- Message router — handles `searchClasses`, `getSections`, `getBookingDetails`, `cancelRefresh`, `finishRefresh`, `getRequirements`, `getSessionStatus`, and `startReauth`.
+- Error contract: API functions return `{ error }` with `no-auth` / `auth-expired` (auth status, redirect, or login HTML) / `http` / `network` / `parse` / `cancelled` / `timeout`; UI keys off these strings.
 
 ### content.js
 - `detectTerm` (content.js:8) — regexes page text for `Fall|Winter|Spring|Summer YYYY`, maps season → period code via `SEASON_MAP` (content.js:4), stores `chrome.storage.local` key `currentTerm`.
+- On a real Fiori document, the content script sends `tssFioriReady` to the worker; it ignores the auto-submitting SAML form served at the same `/fiori` URL.
 - Re-runs debounced (400ms) on load/hashchange/popstate/focus plus a `MutationObserver` on the whole document (content.js:28-42).
 
 ### popup.js (shared UI)
@@ -55,15 +58,15 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 
 ## Data flows
 
-- Auth: user logs into `https://tss.ucsd.edu` in a normal tab → webRequest listener captures cookie/sap-passport/x-csrf-token → storage key `auth` → background attaches them (plus `credentials: 'include'`) to all proxied fetches → popup shows banner on `no-auth`/`auth-expired` via `showAuthBanner` (popup.js:1204).
+- Auth: the Re-auth button in either extension view opens SIS, which redirects through TSS's SAML request page to UCSD sign-in and Duo. TSS request headers are captured into storage key `auth`; a separate OData GET must return the expected JSON before the UI shows Connected. An API failure remains visible across tab focus changes until re-auth or that same API operation succeeds.
 - Term detection: content.js scrapes TSS page → storage `currentTerm` → popup badge (`termBadge`, popup.js:44); default `{ academicYear: '2026', academicPeriod: '2' }` (popup.js:2).
 - Add a class: search → `searchClasses` → results → `getSections` → `groupSections` → section picker → planned-class record (schema built at popup.js:1559-1587, incl. `_lastPkg` raw cache) appended to storage `plannedClasses`.
 - Refresh run: `refreshAllClasses` loops planned classes; per class calls `getSections` + `getBookingDetails`, merges via `updateStoredClass` (popup.js:794), and persists progress in storage `lastRefreshRun` (`{refreshId, startedAt, finishedAt, total, completed, errors, cancelled}`).
-- Storage keys (all `chrome.storage.local`): `auth`, `currentTerm`, `plannedClasses`, `lastRefreshRun`, `req_<moduleID>`, `theme` (`'light'`/`'dark'`; default dark when absent).
+- Storage keys: `chrome.storage.local` holds `auth`, `currentTerm`, `plannedClasses`, `lastRefreshRun`, `req_<moduleID>`, and `theme` (`'light'`/`'dark'`; default dark when absent). `chrome.storage.session` holds `reauthFlow` window/tab IDs and status plus `authFault` operation/error/timestamp, without credentials.
 
 ## External dependencies & services
 
-- TSS (`https://tss.ucsd.edu`) is the only external service; it is a SAP Fiori app exposing OData APIs. All requests use `sap-client=500`.
+- Extension fetches target TSS (`https://tss.ucsd.edu`), a SAP Fiori app exposing OData APIs; the separate sign-in window begins at SIS and follows redirects through TSS proxy, UCSD, and Duo. OData requests use `sap-client=500`.
 - `MODULE_BASE` (background.js:4): `https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd/sap/yucsd_con_module_servicedef/0001` — search, sections, prereqs.
 - `BOOKING_BASE` (background.js:6): `https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV` — booking state / dated event schedules (`ModuleHeaderSet(...)/Event?$expand=BookingCheckLog,Request,EventSchedule,CreditOptions`).
 - Auth capture URL pattern: `https://tss.ucsd.edu/sap/*` (background.js:87).
@@ -87,9 +90,9 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 - Planned-class records embed the raw section package in `_lastPkg` (stripped when writing `availablePackages`); `loadPlanned` (popup.js:25) rebuilds `scheduleBlocks` from it at load time, so changing the block shape requires touching both.
 - Search results are capped at `$top=30` (background.js:171) and sections at `$top=1000` (background.js:245); there is no `$skip` pagination, so broad searches silently truncate — large result sets are not surfaced.
 - `tssLink` (popup.js:358) emits `.../<moduleID>/00000000/0/0/0/00000000-0000-0000-0000-000000000000/<eventPkgObjid>/<year>/<period>/?`. The `00000000` int and all-zero GUID segments are not understood, but the link resolves correctly on TSS as-is — do not "clean up" or omit them without re-verifying.
-- `x-csrf-token` lifetime is untested. If it expires mid-session, proxied calls return `auth-expired` (background.js:208) and the user must re-hit a TSS page so the webRequest listener recaptures; there is no proactive refresh.
+- `x-csrf-token` lifetime is untested. Re-auth clears captured auxiliary headers when the TSS cookie changes, then verifies the new session.
 - Term→year mapping is unverified for Spring/Summer. `detectTerm` (content.js:8) uses the calendar year scraped from the page text verbatim as `academicYear`, with no year+1 adjustment. If TSS's OData API keys Spring/Summer to a different academic year, searches for those terms may return nothing.
-- Auth-expiry detection is reactive only: the banner (`showAuthBanner`, popup.js:1204) appears after an API call fails with 401/403/302, not proactively — so the first request following session expiry always errors before the user is prompted to re-login.
+- `getSessionStatus` actively checks a read-only TSS entity request. API calls also treat redirects and login HTML as expired auth; the Re-auth window opens only on a user click.
 - The search `$filter` in `searchClasses` is `(AcademicYear eq '<year>' or AcademicYear eq '<year>')` — both branches of the `or` use the same year (background.js:168). This is almost certainly a leftover from the original TSS capture (which crossed two academic years for Spring/Summer); right now the `or` is a no-op. If the term→year gap above is fixed, this filter is where the second year would go.
 - `showFinals` is a hardcoded `const ... = true` (popup.js:7) with no UI toggle and no `settings` storage key. The plan's `settings` schema (`showFinals`, `calendarStartHour`, `calendarEndHour`) was never implemented — calendar hours auto-fit from the data via `calendarLayout` (popup.js:218) instead. Adding a finals toggle or fixed hours means introducing the `settings` key and replacing the const.
 - `searchClasses` sends a single search GET in the `$batch` body (background.js:160-184). The original TSS capture (see `Outline_And_RE_Notes.md`) batches two GETs — the search plus an exact-`ModuleID` lookup for a detail-view sidecar. That second GET was intentionally dropped here; if a detail sidecar is ever added, it would need its own batch part or a separate `getSections`-style call.

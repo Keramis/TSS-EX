@@ -5,6 +5,18 @@ const SEASON_MAP = { Fall: '1', Winter: '2', Spring: '3', Summer: '4' };
 let lastStoredTerm = null;
 let termRefreshTimer = null;
 
+function reportFioriLanding() {
+  // The first /fiori document can be an auto-submitting SAML request.
+  if (document.querySelector('form input[name="SAMLRequest"], form input[name="SAMLResponse"]')) return;
+  chrome.runtime.sendMessage({ type: 'tssFioriReady' }).catch(() => undefined);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', reportFioriLanding, { once: true });
+} else {
+  reportFioriLanding();
+}
+
 function detectTerm() {
   const text = `${document.title || ''}\n${document.body?.innerText || ''}`;
   const m = text.match(/(Fall|Winter|Spring|Summer)\s+(\d{4})/i);

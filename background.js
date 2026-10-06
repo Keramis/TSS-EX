@@ -4,6 +4,9 @@
 const MODULE_BASE =
   'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd/sap/yucsd_con_module_servicedef/0001';
 const BOOKING_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV';
+const AUTH_START_URL = 'https://sis.ucsd.edu/';
+const CSRF_URL = `${MODULE_BASE}/$metadata?sap-client=500`;
+const AUTH_VERIFY_URL = `${MODULE_BASE}/YUCSD_CON_MODULE?sap-client=500&$select=ModuleID&$top=1`;
 const SEARCH_SELECT =
   'AcademicLevel,AcademicPeriod,AcademicYear,CourseAbbr,CourseTitle,CreditsDisplay,DepartmentAbbr,DepartmentText,ModuleID,incrementDisplay';
 const SECTION_SELECT =
@@ -11,6 +14,10 @@ const SECTION_SELECT =
 let bookingRequestQueue = Promise.resolve();
 let lastBookingRequestAt = 0;
 let authCaptureQueue = Promise.resolve();
+let sessionVerificationPromise = null;
+let reauthStartPromise = null;
+let reauthLandingAgain = false;
+let reauthFinalDocumentSeen = false;
 const refreshRequestControllers = new Map();
 const cancelledRefreshIds = new Set();
 
@@ -18,10 +25,11 @@ function captureAuthHeaders(headers) {
   authCaptureQueue = authCaptureQueue.then(async () => {
     const { auth: previous } = await chrome.storage.local.get('auth');
     const now = Date.now();
+    const cookieChanged = Boolean(headers.cookie && headers.cookie !== previous?.cookie);
     const next = {
       cookie: headers.cookie || previous?.cookie || null,
-      sapPassport: headers.sapPassport || previous?.sapPassport || null,
-      csrfToken: headers.csrfToken || previous?.csrfToken || null,
+      sapPassport: cookieChanged ? null : headers.sapPassport || previous?.sapPassport || null,
+      csrfToken: cookieChanged ? null : headers.csrfToken || previous?.csrfToken || null,
     };
     const changed = next.cookie !== (previous?.cookie || null)
       || next.sapPassport !== (previous?.sapPassport || null)
@@ -80,7 +88,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       const n = h.name.toLowerCase();
       if (n === 'cookie') headers.cookie = h.value;
       else if (n === 'sap-passport') headers.sapPassport = h.value;
-      else if (n === 'x-csrf-token') headers.csrfToken = h.value;
+      else if (n === 'x-csrf-token' && h.value && h.value.toLowerCase() !== 'fetch') headers.csrfToken = h.value;
     }
     if (headers.cookie || headers.sapPassport || headers.csrfToken) captureAuthHeaders(headers);
   },
@@ -95,12 +103,283 @@ async function getAuth() {
 
 async function getSessionStatus() {
   const auth = await getAuth();
-  return { connected: Boolean(authPresent(auth)), capturedAt: auth?.capturedAt || null };
+  const flow = await getReauthFlow();
+  if (flow?.phase === 'pending' || flow?.phase === 'verifying') {
+    return { connected: false, capturedAt: auth?.capturedAt || null, reauthPhase: flow.phase };
+  }
+  const reauthError = flow?.phase === 'failed' ? (flow.detail || flow.error || null) : null;
+  const fault = await getAuthFault();
+  if (fault) {
+    return {
+      connected: false,
+      capturedAt: auth?.capturedAt || null,
+      reauthPhase: flow?.phase || null,
+      reauthError,
+      error: fault.error,
+    };
+  }
+  const verification = await verifyTssSession();
+  return {
+    connected: verification.connected,
+    capturedAt: (await getAuth())?.capturedAt || null,
+    reauthPhase: verification.connected ? 'connected' : flow?.phase || null,
+    reauthError,
+    error: verification.error || null,
+  };
 }
 
 function authPresent(auth) {
   return auth && (auth.cookie || auth.csrfToken || auth.sapPassport);
 }
+
+function optionalAuthHeaders(auth) {
+  return {
+    ...(auth.sapPassport ? { 'sap-passport': auth.sapPassport } : {}),
+    ...(auth.csrfToken ? { 'x-csrf-token': auth.csrfToken } : {}),
+  };
+}
+
+function isAuthResponse(resp) {
+  if (resp.type === 'opaqueredirect' || [301, 302, 303, 307, 308, 401, 403].includes(resp.status)) return true;
+  if (!resp.ok) return false;
+  try {
+    if (new URL(resp.url).origin !== 'https://tss.ucsd.edu') return true;
+  } catch {
+    return true;
+  }
+  return /text\/html/i.test(resp.headers.get('content-type') || '');
+}
+
+async function ensureCsrfToken(force = false) {
+  try {
+    const existing = await getAuth();
+    if (existing?.csrfToken && !force) return;
+    if (existing?.csrfToken && force) {
+      await chrome.storage.local.set({ auth: { ...existing, csrfToken: null } });
+    }
+  } catch {
+    return;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const resp = await fetch(CSRF_URL, {
+      headers: { 'x-csrf-token': 'Fetch' },
+      credentials: 'include',
+      redirect: 'manual',
+      signal: controller.signal,
+    });
+    if (isAuthResponse(resp) || !resp.ok) return;
+    const token = resp.headers.get('x-csrf-token');
+    if (!token || /^(fetch|required)$/i.test(token)) return;
+    await authCaptureQueue;
+    const auth = await getAuth();
+    if (authPresent(auth)) {
+      await chrome.storage.local.set({ auth: { ...auth, csrfToken: token, capturedAt: Date.now() } });
+    }
+  } catch {
+    // Read-only API calls can still work if this service does not issue a token.
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function verifyTssSession() {
+  if (sessionVerificationPromise) return sessionVerificationPromise;
+  sessionVerificationPromise = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const resp = await fetch(AUTH_VERIFY_URL, {
+        headers: { Accept: 'application/json' },
+        credentials: 'include',
+        redirect: 'manual',
+        signal: controller.signal,
+      });
+      if (isAuthResponse(resp) || !resp.ok || !/application\/json/i.test(resp.headers.get('content-type') || '')) {
+        return { connected: false, error: 'auth-expired' };
+      }
+      const data = await resp.json();
+      if (!Array.isArray(data?.value)) return { connected: false, error: 'invalid-response' };
+      await authCaptureQueue;
+      if (!authPresent(await getAuth())) return { connected: false, error: 'no-auth' };
+      await ensureCsrfToken();
+      return { connected: true, error: null };
+    } catch {
+      return { connected: false, error: 'network' };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+  try {
+    return await sessionVerificationPromise;
+  } finally {
+    sessionVerificationPromise = null;
+  }
+}
+
+async function getReauthFlow() {
+  const { reauthFlow } = await chrome.storage.session.get('reauthFlow');
+  return reauthFlow || null;
+}
+
+async function getAuthFault() {
+  const { authFault } = await chrome.storage.session.get('authFault');
+  return authFault || null;
+}
+
+async function clearAuthFault() {
+  await chrome.storage.session.remove('authFault');
+}
+
+async function trackApiResult(operation, request) {
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await request;
+  } catch {
+    result = { error: 'network' };
+  }
+  try {
+    if (['no-auth', 'auth-expired', 'network', 'parse', 'http'].includes(result?.error)) {
+      await chrome.storage.session.set({ authFault: { operation, error: result.error, at: Date.now() } });
+    } else if (!result?.error) {
+      const fault = await getAuthFault();
+      if (fault?.operation === operation && fault.at <= startedAt) await clearAuthFault();
+    }
+  } catch {
+    // Session-state reporting must not prevent the API result from reaching the UI.
+  }
+  return result;
+}
+
+async function setReauthFlow(flow) {
+  await chrome.storage.session.set({ reauthFlow: flow });
+}
+
+function getReauthErrorDetail(error) {
+  const detail = String(error?.message || error || 'Unknown browser error')
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
+  return detail.slice(0, 180) || 'Unknown browser error';
+}
+
+async function startReauth() {
+  if (reauthStartPromise) return reauthStartPromise;
+  reauthStartPromise = (async () => {
+    let windowId = null;
+    try {
+      const previous = await getReauthFlow();
+      if (Number.isInteger(previous?.windowId) && Number.isInteger(previous?.tabId)) {
+        if (['pending', 'verifying'].includes(previous.phase)) {
+          try {
+            await chrome.tabs.get(previous.tabId);
+            await chrome.windows.get(previous.windowId);
+            await chrome.windows.update(previous.windowId, { focused: true });
+            return { phase: previous.phase };
+          } catch {
+            await chrome.windows.remove(previous.windowId).catch(() => undefined);
+          }
+        } else {
+          await chrome.windows.remove(previous.windowId).catch(() => undefined);
+        }
+      }
+      reauthLandingAgain = false;
+      reauthFinalDocumentSeen = false;
+      await setReauthFlow({ phase: 'pending', sawAcs: false, startedAt: Date.now() });
+      const loginWindow = await chrome.windows.create({
+        url: 'about:blank', type: 'popup', width: 600, height: 800, focused: true,
+      });
+      windowId = loginWindow?.id;
+      if (!Number.isInteger(windowId)) throw new Error('Sign-in window did not open');
+      const [tab] = await chrome.tabs.query({ windowId });
+      if (!Number.isInteger(tab?.id)) throw new Error('Sign-in tab did not open');
+      await setReauthFlow({ phase: 'pending', windowId, tabId: tab.id, sawAcs: false, startedAt: Date.now() });
+      await chrome.tabs.update(tab.id, { url: AUTH_START_URL });
+      return { phase: 'pending' };
+    } catch (error) {
+      const detail = getReauthErrorDetail(error);
+      console.error('Re-auth could not open the sign-in window:', detail);
+      if (windowId !== null) await chrome.windows.remove(windowId).catch(() => undefined);
+      await setReauthFlow({ phase: 'failed', error: 'window', detail }).catch(() => undefined);
+      return { phase: 'failed', error: 'window', detail };
+    }
+  })();
+  try {
+    return await reauthStartPromise;
+  } finally {
+    reauthStartPromise = null;
+  }
+}
+
+async function finishReauth(tabId, finalDocument = false) {
+  const flow = await getReauthFlow();
+  if (flow?.tabId !== tabId) return;
+  if (flow.phase === 'verifying') {
+    reauthLandingAgain = true;
+    if (finalDocument) reauthFinalDocumentSeen = true;
+    return;
+  }
+  if (flow.phase !== 'pending') return;
+  await setReauthFlow({ ...flow, phase: 'verifying' });
+  await authCaptureQueue;
+  const hadCsrfToken = Boolean((await getAuth())?.csrfToken);
+  const verification = await verifyTssSession();
+  const current = await getReauthFlow();
+  if (current?.windowId !== flow.windowId || current?.phase !== 'verifying') return;
+  if (!verification.connected) {
+    const retry = reauthLandingAgain;
+    const finalLanding = finalDocument || reauthFinalDocumentSeen;
+    reauthLandingAgain = false;
+    reauthFinalDocumentSeen = false;
+    await setReauthFlow({ ...flow, phase: finalLanding ? 'failed' : 'pending', error: finalLanding ? verification.error : undefined });
+    if (retry && !finalLanding) finishReauth(tabId).catch(() => undefined);
+    return;
+  }
+  if (hadCsrfToken) await ensureCsrfToken(true);
+  reauthLandingAgain = false;
+  reauthFinalDocumentSeen = false;
+  await clearAuthFault();
+  await setReauthFlow({ phase: 'connected', completedAt: Date.now() });
+  await chrome.windows.remove(flow.windowId).catch(() => undefined);
+}
+
+async function handleReauthNavigation(tabId, change, tab) {
+  if (!['loading', 'complete'].includes(change.status) || !(change.url || tab.url || tab.pendingUrl)) return;
+  try {
+    const landing = new URL(change.url || tab.url || tab.pendingUrl);
+    if (landing.origin !== 'https://tss.ucsd.edu') return;
+    const flow = await getReauthFlow();
+    if (flow?.tabId !== tabId || !['pending', 'verifying'].includes(flow.phase)) return;
+    if (landing.pathname === '/sap/saml2/sp/acs/500') {
+      if (!flow.sawAcs) await setReauthFlow({ ...flow, sawAcs: true });
+    } else if (landing.pathname === '/fiori' && flow.sawAcs) {
+      finishReauth(tabId).catch(() => undefined);
+    }
+  } catch {
+    // Ignore navigations outside the TSS sign-in return path.
+  }
+}
+
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
+  handleReauthNavigation(tabId, change, tab).catch(() => undefined);
+});
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  getReauthFlow().then((flow) => {
+    if (flow?.windowId === windowId && ['pending', 'verifying'].includes(flow.phase)) {
+      return setReauthFlow({ phase: 'cancelled' });
+    }
+  }).catch(() => undefined);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  getReauthFlow().then((flow) => {
+    if (flow?.tabId === tabId && ['pending', 'verifying'].includes(flow.phase)) {
+      return setReauthFlow({ phase: 'cancelled' });
+    }
+  }).catch(() => undefined);
+});
 
 // ----- Multipart / JSON parsing helpers -----
 function extractJson(text) {
@@ -146,6 +425,13 @@ function parseBatchResponse(text) {
   return found;
 }
 
+function batchError(text) {
+  const statuses = [...text.matchAll(/^HTTP\/1\.[01]\s+(\d{3})\b/gm)].map((match) => Number(match[1]));
+  const status = statuses.find((value) => value >= 300);
+  if (!status) return null;
+  return { error: [301, 302, 303, 307, 308, 401, 403].includes(status) ? 'auth-expired' : 'http', status };
+}
+
 function parseTssJson(text) {
   try {
     return JSON.parse(text);
@@ -172,7 +458,7 @@ async function searchClasses(term, query) {
   const partHeaders =
     'Accept: application/json;odata.metadata=minimal;IEEE754Compatible=true\r\n' +
     'Accept-Language: en\r\n' +
-    `X-CSRF-Token: ${auth.csrfToken || ''}\r\n` +
+    (auth.csrfToken ? `X-CSRF-Token: ${auth.csrfToken}\r\n` : '') +
     'Content-Type: application/json;charset=UTF-8;IEEE754Compatible=true\r\n';
 
   const body =
@@ -193,24 +479,26 @@ async function searchClasses(term, query) {
         'Accept-Language': 'en',
         'odata-maxversion': '4.0',
         'odata-version': '4.0',
-        'sap-passport': auth.sapPassport || '',
-        'x-csrf-token': auth.csrfToken || '',
+        ...optionalAuthHeaders(auth),
         'x-requested-with': 'XMLHttpRequest',
         'x-xhr-logon': 'accept="iframe,strict-window,window"',
       },
       credentials: 'include',
+      redirect: 'manual',
       body,
     });
   } catch (e) {
     return { error: 'network', message: e.message };
   }
 
-  if (resp.status === 401 || resp.status === 403 || resp.status === 302) {
+  if (isAuthResponse(resp)) {
     return { error: 'auth-expired', status: resp.status };
   }
   if (!resp.ok) return { error: 'http', status: resp.status };
 
   const text = await resp.text();
+  const innerError = batchError(text);
+  if (innerError) return innerError;
   const raw = parseBatchResponse(text);
   const seen = new Set();
   const results = [];
@@ -252,14 +540,14 @@ async function getSections(moduleID, term, refreshId) {
         'Accept-Language': 'en',
         'odata-maxversion': '4.0',
         'odata-version': '4.0',
-        'sap-passport': auth.sapPassport || '',
-        'x-csrf-token': auth.csrfToken || '',
+        ...optionalAuthHeaders(auth),
         'x-requested-with': 'XMLHttpRequest',
       },
       credentials: 'include',
+      redirect: 'manual',
       signal: refreshRequest.signal,
     });
-    if (resp.status === 401 || resp.status === 403 || resp.status === 302) {
+    if (isAuthResponse(resp)) {
       return { error: 'auth-expired', status: resp.status };
     }
     if (!resp.ok) return { error: 'http', status: resp.status };
@@ -307,14 +595,14 @@ async function fetchBookingDetails(moduleID, eventPkgObjid, term, refreshRequest
       headers: {
         Accept: 'application/json',
         'Accept-Language': 'en',
-        'sap-passport': auth.sapPassport || '',
-        'x-csrf-token': auth.csrfToken || '',
+        ...optionalAuthHeaders(auth),
         'x-requested-with': 'XMLHttpRequest',
       },
       credentials: 'include',
+      redirect: 'manual',
       signal: refreshRequest.signal,
     });
-    if (resp.status === 401 || resp.status === 403 || resp.status === 302) {
+    if (isAuthResponse(resp)) {
       return { error: 'auth-expired', status: resp.status };
     }
     if (!resp.ok) return { error: 'http', status: resp.status };
@@ -367,7 +655,7 @@ async function getRequirements(moduleID) {
   const partHeaders =
     'Accept: application/json;odata.metadata=minimal;IEEE754Compatible=true\r\n' +
     'Accept-Language: en\r\n' +
-    `X-CSRF-Token: ${auth.csrfToken || ''}\r\n` +
+    (auth.csrfToken ? `X-CSRF-Token: ${auth.csrfToken}\r\n` : '') +
     'Content-Type: application/json;charset=UTF-8;IEEE754Compatible=true\r\n';
 
   const body =
@@ -388,40 +676,50 @@ async function getRequirements(moduleID) {
         'Accept-Language': 'en',
         'odata-maxversion': '4.0',
         'odata-version': '4.0',
-        'sap-passport': auth.sapPassport || '',
-        'x-csrf-token': auth.csrfToken || '',
+        ...optionalAuthHeaders(auth),
         'x-requested-with': 'XMLHttpRequest',
         'x-xhr-logon': 'accept="iframe,strict-window,window"',
       },
       credentials: 'include',
+      redirect: 'manual',
       body,
     });
   } catch (e) {
     return { error: 'network', message: e.message };
   }
 
-  if (resp.status === 401 || resp.status === 403 || resp.status === 302) {
+  if (isAuthResponse(resp)) {
     return { error: 'auth-expired', status: resp.status };
   }
   if (!resp.ok) return { error: 'http', status: resp.status };
 
   const text = await resp.text();
+  const innerError = batchError(text);
+  if (innerError) return innerError;
   const obj = extractJson(text);
   return { requirements: (obj && obj.value) || [] };
 }
 
 // ----- Message router -----
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'tssFioriReady') {
+    const tabId = _sender.tab?.id;
+    if (tabId && _sender.url?.startsWith('https://tss.ucsd.edu/fiori')) {
+      finishReauth(tabId, true).catch(() => undefined);
+    }
+    sendResponse({ received: true });
+    return false;
+  }
   if (msg.type === 'searchClasses') {
-    searchClasses(msg.term, msg.query).then(sendResponse);
+    trackApiResult(msg.type, searchClasses(msg.term, msg.query)).then(sendResponse);
     return true;
   }
   if (msg.type === 'getSections') {
-    getSections(msg.moduleID, msg.term, msg.refreshId).then(sendResponse);
+    trackApiResult(msg.type, getSections(msg.moduleID, msg.term, msg.refreshId)).then(sendResponse);
     return true;
   }
   if (msg.type === 'getBookingDetails') {
-    getBookingDetails(msg.moduleID, msg.eventPkgObjid, msg.term, msg.refreshId).then(sendResponse);
+    trackApiResult(msg.type, getBookingDetails(msg.moduleID, msg.eventPkgObjid, msg.term, msg.refreshId)).then(sendResponse);
     return true;
   }
   if (msg.type === 'cancelRefresh') {
@@ -434,12 +732,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return false;
   }
   if (msg.type === 'getRequirements') {
-    getRequirements(msg.moduleID).then(sendResponse);
+    trackApiResult(msg.type, getRequirements(msg.moduleID)).then(sendResponse);
     return true;
   }
   if (msg.type === 'getSessionStatus') {
     getSessionStatus().then(sendResponse);
     return true;
+  }
+  if (msg.type === 'startReauth') {
+    console.info('Re-auth request received');
+    const flow = startReauth();
+    // Reply before the sign-in window takes focus; Chrome may close an action
+    // popup as soon as that browser window opens.
+    sendResponse({ phase: 'pending' });
+    flow.catch((error) => {
+      const detail = getReauthErrorDetail(error);
+      console.error('Re-auth startup failed unexpectedly:', detail);
+      setReauthFlow({ phase: 'failed', error: 'background', detail }).catch(() => undefined);
+    });
+    return false;
   }
   return false;
 });
