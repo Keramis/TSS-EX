@@ -1637,6 +1637,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const plannerButton = document.getElementById('open-planner');
   if (plannerButton) plannerButton.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('planner.html') }));
+  const themeToggle = document.getElementById('theme-toggle');
+  if (themeToggle) {
+    const syncThemeToggle = () => {
+      const light = document.documentElement.classList.contains('light-mode');
+      themeToggle.setAttribute('aria-checked', String(light));
+    };
+    themeToggle.addEventListener('click', () => {
+      const light = document.documentElement.classList.toggle('light-mode');
+      themeToggle.setAttribute('aria-checked', String(light));
+      chrome.storage.local.set({ theme: light ? 'light' : 'dark' });
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes.theme) syncThemeToggle();
+    });
+    syncThemeToggle();
+  }
   const refreshButton = document.getElementById('refresh-all');
   if (refreshButton) refreshButton.addEventListener('click', () => {
     if (isPlanner) refreshAllClasses();

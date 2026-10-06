@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>UCSD EZPLAN</title>
   <link rel="stylesheet" href="popup.css">
+  <script src="theme-boot.js"></script>
 </head>
 <body class="compact-view">
   <div id="app">
@@ -16,6 +17,11 @@
       </div>
       <div id="term-badge" class="term-badge" title="Current term">—</div>
       <button id="open-planner" class="btn btn-small">Full planner</button>
+      <div class="topbar-right">
+        <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-checked="true" aria-label="Toggle light mode" title="Toggle light/dark mode">
+          <span class="theme-toggle-knob"></span>
+        </button>
+      </div>
     </header>
 
     <div class="search-row">

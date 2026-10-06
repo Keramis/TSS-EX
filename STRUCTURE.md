@@ -7,8 +7,9 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 - `manifest.json` — extension manifest; no build step, plain JS, no dependencies.
 - `background.js` — MV3 service worker (`"type": "module"`), registered at manifest.json:8.
 - `content.js` — content script injected on `https://tss.ucsd.edu/fiori*` (manifest.json:12-17).
-- `popup.html` — toolbar popup (`action.default_popup`, manifest.json:18-21); loads `popup.js` + `popup.css`.
-- `planner.html` — side panel (`side_panel.default_path`, manifest.json:22-24) and full-tab planner opened via `chrome.tabs.create` (popup.js:1639); loads the same `popup.js`/`popup.css`.
+- `popup.html` — toolbar popup (`action.default_popup`, manifest.json:18-21); loads `popup.js` + `popup.css`; loads `theme-boot.js` in `<head>` before body to apply the saved theme without a flash.
+- `planner.html` — side panel (`side_panel.default_path`, manifest.json:22-24) and full-tab planner opened via `chrome.tabs.create` (popup.js:1639); loads the same `popup.js`/`popup.css` and `theme-boot.js` in `<head>`.
+- `theme-boot.js` — small async IIFE loaded in `<head>` of both popup.html and planner.html; reads `chrome.storage.local.get('theme')` and adds class `light-mode` to `document.documentElement` when the value is `'light'` (default dark); swallows storage errors and stays dark. Runs before body paint to avoid a flash of the wrong theme.
 - `popup.js` boot: `DOMContentLoaded` handler (popup.js:1618) checks auth, loads storage, renders, and auto-starts a full refresh when opened as `planner.html?refresh=all` (popup.js:1688).
 
 ## Layout
@@ -17,8 +18,9 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 - `background.js` — API proxy + auth capture (runs only in the worker).
 - `content.js` — term detection on TSS pages.
 - `popup.js` — all UI logic, shared by popup.html and planner.html.
-- `popup.html` / `planner.html` — near-identical markup; body class `compact-view` vs `full-planner` selects layout via `isPlanner` (popup.js:1629).
-- `popup.css` — all styling for both surfaces.
+- `theme-boot.js` — early theme-application IIFE (see Entry points); no exports.
+- `popup.html` / `planner.html` — near-identical markup; body class `compact-view` vs `full-planner` selects layout via `isPlanner` (popup.js:1629). Both load `theme-boot.js` in `<head>` and share a header theme-toggle button (`<div class="topbar-right"><button id="theme-toggle" class="theme-toggle" role="switch" ...><span class="theme-toggle-knob"></span></button>`).
+- `popup.css` — all styling for both surfaces. Palette is defined as semantic design tokens: `:root` holds the dark (default) palette and `html.light-mode` overrides with light values; raw palette colors (mocha/steel/teal/pumpkin/powder) appear only in those two blocks and rules reference semantic tokens. Also styles `.topbar-right`, `.theme-toggle`, `.theme-toggle-knob` (knob shows `☾`/`☀`).
 - `icon.png` — extension icon.
 - `Outline_And_RE_Notes.md`, `notes.txt`, `*_request.txt` — design notes / sample API captures; not loaded by code.
 
@@ -49,6 +51,7 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 - Search: `doSearch` (popup.js:1281) with `normalizeSearchQuery` (popup.js:1274, e.g. `phys 2c` → `PHYS-002C`); result click → `getSections` → `openSectionPicker` (popup.js:1475) → writes a planned class.
 - Prereqs: `parseRequirement` / `buildPrereqTree` / `renderPrereqTree` (popup.js:1343-1392); cached under storage key `req_<moduleID>` (popup.js:1394-1403).
 - Storage sync: `chrome.storage.onChanged` listeners re-check auth (popup.js:1619) and re-render on `plannedClasses` / `currentTerm` / `lastRefreshRun` changes (popup.js:1653); `lastRefreshRun` is also how a second planner tab observes an in-flight refresh run (`observedRefreshId`, popup.js:958-971, 1070-1083).
+- Theme toggle: `#theme-toggle` click handler (popup.js:~1640, near the `#open-planner` handler) toggles `light-mode` on `document.documentElement`, writes `chrome.storage.local.set({ theme: 'light'|'dark' })`, and updates `aria-checked`; a `chrome.storage.onChanged` listener for the `theme` key calls `syncThemeToggle()` to keep the switch in sync across popup/planner tabs; initial `syncThemeToggle()` runs at boot. `theme-boot.js` applies the saved class before paint so the toggle handler only manages later changes.
 
 ## Data flows
 
@@ -56,7 +59,7 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 - Term detection: content.js scrapes TSS page → storage `currentTerm` → popup badge (`termBadge`, popup.js:44); default `{ academicYear: '2026', academicPeriod: '2' }` (popup.js:2).
 - Add a class: search → `searchClasses` → results → `getSections` → `groupSections` → section picker → planned-class record (schema built at popup.js:1559-1587, incl. `_lastPkg` raw cache) appended to storage `plannedClasses`.
 - Refresh run: `refreshAllClasses` loops planned classes; per class calls `getSections` + `getBookingDetails`, merges via `updateStoredClass` (popup.js:794), and persists progress in storage `lastRefreshRun` (`{refreshId, startedAt, finishedAt, total, completed, errors, cancelled}`).
-- Storage keys (all `chrome.storage.local`): `auth`, `currentTerm`, `plannedClasses`, `lastRefreshRun`, `req_<moduleID>`.
+- Storage keys (all `chrome.storage.local`): `auth`, `currentTerm`, `plannedClasses`, `lastRefreshRun`, `req_<moduleID>`, `theme` (`'light'`/`'dark'`; default dark when absent).
 
 ## External dependencies & services
 
@@ -77,7 +80,7 @@ Chrome extension (Manifest V3) that adds a class search/planning interface on to
 ## Gotchas
 
 - `popup.js` serves both surfaces; behavior branches on `isPlanner` (body class `full-planner`), set at popup.js:1629.
-- `popup.html` and `planner.html` duplicate their markup — DOM/ID changes must be mirrored in both files.
+- `popup.html` and `planner.html` duplicate their markup — DOM/ID changes must be mirrored in both files. This now includes the shared `<div class="topbar-right">` + `#theme-toggle` header button and the `<head>` `<script src="theme-boot.js">` tag.
 - MV3 service worker is ephemeral: in-memory state (`bookingRequestQueue`, `cancelledRefreshIds`, `refreshRequestControllers`) resets when the worker sleeps; durable refresh state lives in `lastRefreshRun`.
 - Single-flight refresh guards: `refreshAllClasses` refuses while `singleClassRefreshes` is non-empty and vice versa (popup.js:946-949, 1063-1067).
 - Nothing works without a captured TSS session — every API call first checks `authPresent` (background.js:101) and returns `no-auth`.
