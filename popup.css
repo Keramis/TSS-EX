@@ -701,20 +701,44 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
   border-top: 1px solid var(--border);
 }
 .refresh-status {
+  position: relative;
+  overflow: hidden;
   margin: 0 0 8px;
-  padding: 7px 9px;
+  padding: 6px 10px;
+  min-height: 34px;
   color: var(--muted);
   background: var(--bg-subtle);
   border-radius: 4px;
-  font-size: 12px;
   display: flex;
-  flex-direction: column;
-  gap: 7px;
+  align-items: center;
 }
-.refresh-status.danger { color: var(--danger); background: var(--danger-bg); }
-.refresh-progress { height: 5px; width: 100%; overflow: hidden; border-radius: 4px; background: var(--bg-strong); }
-.refresh-progress > span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--teal-text); transition: width 220ms ease; }
+.refresh-status.danger:not(.has-progress) { color: var(--danger); background: var(--danger-bg); }
+.refresh-status #refresh-status-text {
+  position: relative;
+  z-index: 1;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.15;
+  color: var(--text);
+  transition: color 400ms ease;
+}
+.refresh-status.has-progress #refresh-status-text {
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.45);
+}
+.refresh-progress {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  background: var(--bg-strong);
+  transition: background-color 400ms ease;
+}
+.refresh-progress > span { display: block; width: 0; height: 100%; background: #2f6fed; transition: width 400ms ease, background-color 400ms ease; }
 .refresh-progress.hidden { display: none; }
+.refresh-status.state-progressing .refresh-progress > span { background: #2f6fed; }
+.refresh-status.state-complete .refresh-progress > span { background: #1f9d55; }
+.refresh-status.state-error .refresh-progress > span { background: #d64545; }
 .detail-refresh-indicator { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; color: var(--muted); font-size: 11px; }
 .detail-refresh-track { flex: 1; height: 4px; overflow: hidden; border-radius: 4px; background: var(--bg-strong); }
 .detail-refresh-track span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--teal-text); transition: width 220ms ease; }

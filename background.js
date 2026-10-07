@@ -743,7 +743,7 @@ function parseTssJson(text) {
 }
 
 // ----- API: search classes -----
-async function searchClasses(term, query) {
+async function searchClasses(term, query, csrfRetry = false) {
   const auth = await getAuth();
   if (!authPresent(auth)) return { error: 'no-auth' };
 
@@ -791,7 +791,14 @@ async function searchClasses(term, query) {
       body,
       signal: controller.signal,
     });
-    if (isAuthResponse(resp)) return { error: 'auth-expired', status: resp.status };
+    if (isAuthResponse(resp)) {
+      if (!csrfRetry && resp.status === 403) {
+        // A stale CSRF token can reject this POST while authenticated GETs still work.
+        await ensureCsrfToken(true);
+        return searchClasses(term, query, true);
+      }
+      return { error: 'auth-expired', status: resp.status };
+    }
     if (!resp.ok) return { error: 'http', status: resp.status };
     text = await resp.text();
   } catch (e) {
@@ -801,7 +808,13 @@ async function searchClasses(term, query) {
   }
 
   const innerError = batchError(text);
-  if (innerError) return innerError;
+  if (innerError) {
+    if (!csrfRetry && innerError.status === 403) {
+      await ensureCsrfToken(true);
+      return searchClasses(term, query, true);
+    }
+    return innerError;
+  }
   const raw = parseBatchResponse(text);
   const seen = new Set();
   const results = [];

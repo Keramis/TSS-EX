@@ -943,7 +943,16 @@ function showRefreshStatus(message, error = false, progressValue = null) {
   if (progress && fill) {
     const hasProgress = progressValue !== null && progressValue !== undefined;
     const bounded = Math.max(0, Math.min(100, Number(progressValue) || 0));
-    progress.classList.toggle('hidden', !message || !hasProgress);
+    const showBar = Boolean(message) && hasProgress;
+    progress.classList.toggle('hidden', !showBar);
+    status.classList.toggle('has-progress', showBar);
+    status.classList.remove('state-progressing', 'state-complete', 'state-error');
+    if (showBar) {
+      let state = 'state-progressing';
+      if (error || /error|stopped|[1-9]\d*\s+need attention/i.test(message)) state = 'state-error';
+      else if (bounded >= 100) state = 'state-complete';
+      status.classList.add(state);
+    }
     progress.setAttribute('aria-valuenow', String(bounded));
     fill.style.width = `${bounded}%`;
   }
