@@ -15,6 +15,15 @@ let refreshStopRequested = false;
 const singleClassRefreshes = new Map();
 let singleRefreshQueue = Promise.resolve();
 
+function sendRuntimeMessage(message, timeoutMs = 20000) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error('No response from the background worker. Reload the extension and try again.')), timeoutMs);
+  });
+  const request = Promise.resolve().then(() => chrome.runtime.sendMessage(message));
+  return Promise.race([request, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -1225,17 +1234,31 @@ function stopClassRefresh() {
 }
 
 // ---------- Auth banner ----------
-function showAuthBanner(mode, extra) {
+function showAuthBanner(mode, extra, strategy = null, reauthStep = null) {
   const banner = document.getElementById('auth-banner');
   const text = document.getElementById('auth-text');
   const button = document.getElementById('reauth-btn');
   banner.classList.remove('hidden', 'danger');
-  button.classList.toggle('hidden', ['checking', 'verifying'].includes(mode));
+  banner.dataset.reauthPhase = mode;
+  button.classList.toggle('hidden', ['checking', 'automating', 'duo-opening', 'verifying'].includes(mode));
   button.textContent = mode === 'pending' ? 'Open sign-in' : 'Re-auth';
   if (mode === 'checking') {
     text.textContent = 'Checking TSS connection...';
+  } else if (mode === 'automating') {
+    const stepMessages = {
+      'helper-loaded': 'UCSD sign-in page loaded. Locating its controls...',
+      'chooser-found': 'UCSD SSO option found. Continuing sign-in...',
+      'credential-form-found': 'UCSD credential form found. Preparing sign-in...',
+      'credentials-submitting': 'Submitting UCSD credentials. The real Duo page will open if needed.',
+    };
+    text.textContent = stepMessages[reauthStep]
+      || 'Signing in through UCSD. The real Duo page will open if UCSD requests it.';
+  } else if (mode === 'duo-opening') {
+    text.textContent = 'Opening the UCSD Duo prompt...';
   } else if (mode === 'pending') {
-    text.textContent = 'Finish SIS/UCSD sign-in in the browser window and approve Duo.';
+    text.textContent = strategy === 'custom'
+      ? 'Complete the UCSD Duo prompt in the popup. It will close after TSS confirms the session.'
+      : 'Finish SIS/UCSD sign-in in the browser window and approve Duo.';
   } else if (mode === 'verifying') {
     text.textContent = 'Checking the new TSS session...';
   } else if (mode === 'failed') {
@@ -1244,7 +1267,7 @@ function showAuthBanner(mode, extra) {
       ? `Re-auth failed: ${extra}. Use Re-auth to try again.`
       : 'Could not use the TSS session. Use Re-auth to try again.';
   } else if (mode === 'cancelled') {
-    text.textContent = 'Sign-in window closed before TSS connected. Use Re-auth to try again.';
+    text.textContent = 'Sign-in flow closed before TSS connected. Use Re-auth to try again.';
   } else if (mode === 'expired') {
     banner.classList.add('danger');
     text.textContent = 'Your TSS session has expired. Use Re-auth to fetch class info. Your planned classes are preserved.';
@@ -1328,7 +1351,7 @@ async function doSearch() {
   renderSearchLoading();
   let resp;
   try {
-    resp = await chrome.runtime.sendMessage({ type: 'searchClasses', term: currentTerm, query: q });
+    resp = await sendRuntimeMessage({ type: 'searchClasses', term: currentTerm, query: q }, 30000);
   } catch (e) {
     showAuthBanner('error', e.message);
     showSearchResults(false);
@@ -1639,13 +1662,13 @@ async function checkAuth() {
   const request = ++authCheckSequence;
   let status;
   try {
-    status = await chrome.runtime.sendMessage({ type: 'getSessionStatus' });
+    status = await sendRuntimeMessage({ type: 'getSessionStatus' });
   } catch {
-    status = null;
+    status = { connected: false, error: 'background' };
   }
   if (request !== authCheckSequence) return;
-  if (status?.reauthPhase === 'pending' || status?.reauthPhase === 'verifying') {
-    showAuthBanner(status.reauthPhase);
+  if (['automating', 'duo-opening', 'pending', 'verifying'].includes(status?.reauthPhase)) {
+    showAuthBanner(status.reauthPhase, status.reauthError, status.reauthStrategy, status.reauthStep);
   } else if (status?.connected) {
     hideAuthBanner();
   } else if (status?.reauthPhase === 'failed' || status?.reauthPhase === 'cancelled') {
@@ -1654,6 +1677,8 @@ async function checkAuth() {
     showAuthBanner('expired');
   } else if (status?.error === 'no-auth') {
     showAuthBanner('not-connected');
+  } else if (status?.error === 'background') {
+    showAuthBanner('failed', 'No response from the background worker. Reload the extension and try again.');
   } else if (status?.error) {
     showAuthBanner('failed');
   } else {
@@ -1664,8 +1689,30 @@ async function checkAuth() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  const reauthModeToggle = document.getElementById('reauth-mode-toggle');
+  let reauthUseOfficialPopup = false;
+  const renderReauthMode = (useOfficialPopup) => {
+    reauthUseOfficialPopup = useOfficialPopup === true;
+    reauthModeToggle.textContent = reauthUseOfficialPopup ? 'O' : 'I';
+    reauthModeToggle.dataset.reauthMode = reauthUseOfficialPopup ? 'official' : 'intercept';
+    reauthModeToggle.classList.toggle('official', reauthUseOfficialPopup);
+    reauthModeToggle.setAttribute('aria-checked', String(reauthUseOfficialPopup));
+    const method = reauthUseOfficialPopup ? 'Official popup' : 'Intercept';
+    reauthModeToggle.setAttribute('aria-label', `Re-auth method: ${method}`);
+    reauthModeToggle.title = `Re-auth method: ${method} (${reauthUseOfficialPopup ? 'O' : 'I'}). Click to switch.`;
+  };
+  try {
+    const { reauthUseOfficialPopup } = await chrome.storage.local.get('reauthUseOfficialPopup');
+    renderReauthMode(reauthUseOfficialPopup);
+  } catch {
+    renderReauthMode(false);
+  }
+
   chrome.storage.onChanged.addListener((changes, area) => {
     if ((area === 'local' && changes.auth) || (area === 'session' && (changes.reauthFlow || changes.authFault))) checkAuth();
+    if (area === 'local' && changes.reauthUseOfficialPopup) {
+      renderReauthMode(changes.reauthUseOfficialPopup.newValue === true);
+    }
   });
   window.addEventListener('focus', checkAuth);
   document.addEventListener('visibilitychange', () => {
@@ -1674,15 +1721,132 @@ document.addEventListener('DOMContentLoaded', async () => {
   showAuthBanner('checking');
   checkAuth();
 
-  document.getElementById('reauth-btn').addEventListener('click', async () => {
-    showAuthBanner('pending');
+  document.getElementById('auth-diagnostics-btn').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const details = document.getElementById('auth-diagnostics');
+    const output = document.getElementById('auth-diagnostics-output');
+    button.disabled = true;
+    button.textContent = 'Reading diagnostics...';
     try {
-      const result = await chrome.runtime.sendMessage({ type: 'startReauth' });
-      if (!['pending', 'verifying'].includes(result?.phase)) {
-        showAuthBanner('failed', result?.detail || result?.error || 'No response from the background worker; reload the extension and try again');
+      const report = await sendRuntimeMessage({ type: 'getReauthDiagnostics' });
+      output.value = JSON.stringify(report || { error: 'no-worker-response' }, null, 2);
+      details.classList.remove('hidden');
+      try {
+        await navigator.clipboard.writeText(output.value);
+        button.textContent = 'Diagnostics copied';
+      } catch {
+        details.open = true;
+        output.focus();
+        output.select();
+        button.textContent = 'Select and copy diagnostics below';
       }
-    } catch (error) {
-      showAuthBanner('failed', error?.message || 'Could not contact the background worker');
+    } catch {
+      output.value = 'The running extension worker did not return diagnostics.';
+      details.classList.remove('hidden');
+      details.open = true;
+      button.textContent = 'Retry sign-in diagnostics';
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  const reauthDialog = document.getElementById('reauth-dialog');
+  const reauthForm = document.getElementById('reauth-form');
+  const reauthUsername = document.getElementById('reauth-username');
+  const reauthPassword = document.getElementById('reauth-password');
+  const reauthFormError = document.getElementById('reauth-form-error');
+  const reauthSubmit = reauthForm.querySelector('button[type="submit"]');
+  reauthModeToggle.addEventListener('click', () => {
+    const previous = reauthUseOfficialPopup;
+    const next = !previous;
+    renderReauthMode(next);
+    chrome.storage.local.set({ reauthUseOfficialPopup: next }).catch(() => renderReauthMode(previous));
+  });
+
+  document.getElementById('reauth-btn').addEventListener('click', async () => {
+    if (document.getElementById('auth-banner').dataset.reauthPhase === 'pending') {
+      try {
+        await sendRuntimeMessage({ type: 'startReauth' });
+      } catch {
+        showAuthBanner('failed', 'Could not contact the background worker. Reload the extension and try again.');
+      }
+      return;
+    }
+
+    if (reauthUseOfficialPopup) {
+      showAuthBanner('pending', null, 'official');
+      try {
+        const result = await sendRuntimeMessage({ type: 'startReauth' });
+        if (!['pending', 'verifying', 'automating', 'duo-opening'].includes(result?.phase)) {
+          showAuthBanner('failed', result?.detail || 'Could not open the UCSD sign-in window.');
+        }
+      } catch {
+        showAuthBanner('failed', 'Could not contact the background worker. Reload the extension and try again.');
+      }
+      return;
+    }
+
+    reauthFormError.textContent = '';
+    reauthFormError.classList.add('hidden');
+    reauthDialog.showModal();
+    reauthUsername.focus();
+  });
+
+  document.getElementById('reauth-cancel').addEventListener('click', () => reauthDialog.close());
+  reauthDialog.addEventListener('close', () => {
+    reauthUsername.value = '';
+    reauthPassword.value = '';
+    reauthFormError.textContent = '';
+    reauthFormError.classList.add('hidden');
+  });
+
+  reauthForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (reauthForm.dataset.busy === 'true') return;
+    reauthForm.dataset.busy = 'true';
+    reauthSubmit.disabled = true;
+    reauthFormError.textContent = '';
+    reauthFormError.classList.add('hidden');
+
+    let username = reauthUsername.value.trim();
+    let password = reauthPassword.value;
+    if (!username || !password) {
+      reauthFormError.textContent = 'Enter your UCSD username and password.';
+      reauthFormError.classList.remove('hidden');
+      reauthForm.dataset.busy = 'false';
+      reauthSubmit.disabled = false;
+      return;
+    }
+
+    try {
+      const responsePromise = sendRuntimeMessage({ type: 'startCustomReauth', username, password });
+      username = '';
+      password = '';
+      reauthUsername.value = '';
+      reauthPassword.value = '';
+      reauthDialog.close();
+      showAuthBanner('automating', null, 'custom');
+
+      const result = await responsePromise;
+      if (!['automating', 'duo-opening', 'pending', 'verifying'].includes(result?.phase)) {
+        showAuthBanner('failed', result?.detail || 'Could not start the custom UCSD sign-in flow.');
+      }
+    } catch {
+      username = '';
+      password = '';
+      reauthFormError.textContent = 'Could not send the sign-in request to the extension. Reload the extension and try again.';
+      reauthFormError.classList.remove('hidden');
+      if (reauthDialog.open) {
+        reauthForm.dataset.busy = 'false';
+        reauthSubmit.disabled = false;
+      } else {
+        showAuthBanner('failed', 'Could not contact the background worker. Reload the extension and try again.');
+      }
+    } finally {
+      username = '';
+      password = '';
+      reauthForm.dataset.busy = 'false';
+      reauthSubmit.disabled = false;
     }
   });
 

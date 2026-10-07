@@ -5,6 +5,26 @@ const MODULE_BASE =
   'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd/sap/yucsd_con_module_servicedef/0001';
 const BOOKING_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV';
 const AUTH_START_URL = 'https://sis.ucsd.edu/';
+const CUSTOM_AUTH_START_URL = 'https://tss.ucsd.edu/fiori';
+const DUO_HOST = 'api-ce13a1a7.duosecurity.com';
+const CUSTOM_CREDENTIALS_KEY = 'customReauthCredentials';
+const CUSTOM_REAUTH_TIMEOUT_ALARM = 'customReauthTimeout';
+const CUSTOM_REAUTH_ERROR_DETAILS = {
+  'proxy-choice-not-found': 'Could not select UCSD SSO on the TSS sign-in page.',
+  'helper-not-loaded': 'The UCSD sign-in page did not start the automation. Reload the extension and try again.',
+  'a5-form-not-found': 'The UCSD sign-in form did not load.',
+  'a5-form-not-recognized': 'The UCSD sign-in form was not recognized. Try the official popup.',
+  'credentials-unavailable': 'Sign-in credentials were no longer available. Try again.',
+  'a5-submit-failed': 'Could not submit the UCSD sign-in form.',
+  'a5-login-not-accepted': 'UCSD sign-in did not advance after credentials were submitted.',
+  'injection-failed': 'Could not automate the UCSD sign-in page. Try the official popup.',
+  'duo-window-failed': 'Could not open the Duo prompt window.',
+  'flow-timeout': 'UCSD sign-in did not reach Duo or TSS in time. Try the official popup.',
+};
+const CUSTOM_REAUTH_AUTOMATION_STAGES = {
+  'tssproxy.ucsd.edu': new Set(['helper-loaded', 'chooser-found']),
+  'a5.ucsd.edu': new Set(['helper-loaded', 'credential-form-found', 'credentials-submitting']),
+};
 const CSRF_URL = `${MODULE_BASE}/$metadata?sap-client=500`;
 const AUTH_VERIFY_URL = `${MODULE_BASE}/YUCSD_CON_MODULE?sap-client=500&$select=ModuleID&$top=1`;
 const TSS_SESSION_CACHE_KEY = 'tssSessionVerification';
@@ -19,6 +39,9 @@ let lastBookingRequestAt = 0;
 let authCaptureQueue = Promise.resolve();
 let sessionVerificationPromise = null;
 let reauthStartPromise = null;
+let customReauthStartPromise = null;
+let customCredentialsClaimed = false;
+const customDuoOpeningTabs = new Set();
 let reauthLandingAgain = false;
 let reauthFinalDocumentSeen = false;
 const refreshRequestControllers = new Map();
@@ -110,8 +133,14 @@ async function getAuth() {
 async function getSessionStatus() {
   const auth = await getAuth();
   const flow = await getReauthFlow();
-  if (flow?.phase === 'pending' || flow?.phase === 'verifying') {
-    return { connected: false, capturedAt: auth?.capturedAt || null, reauthPhase: flow.phase };
+  if (['automating', 'duo-opening', 'pending', 'verifying'].includes(flow?.phase)) {
+    return {
+      connected: false,
+      capturedAt: auth?.capturedAt || null,
+      reauthPhase: flow.phase,
+      reauthStrategy: flow.strategy || 'official',
+      reauthStep: flow.automationStage || null,
+    };
   }
   const reauthError = flow?.phase === 'failed' ? (flow.detail || flow.error || null) : null;
   const fault = await getAuthFault();
@@ -120,6 +149,7 @@ async function getSessionStatus() {
       connected: false,
       capturedAt: auth?.capturedAt || null,
       reauthPhase: flow?.phase || null,
+      reauthStrategy: flow?.strategy || null,
       reauthError,
       error: fault.error,
     };
@@ -129,6 +159,7 @@ async function getSessionStatus() {
     connected: verification.connected,
     capturedAt: (await getAuth())?.capturedAt || null,
     reauthPhase: verification.connected ? 'connected' : flow?.phase || null,
+    reauthStrategy: flow?.strategy || null,
     reauthError,
     error: verification.error || null,
   };
@@ -288,11 +319,75 @@ async function setReauthFlow(flow) {
   await chrome.storage.session.set({ reauthFlow: flow });
 }
 
-function getReauthErrorDetail(error) {
-  const detail = String(error?.message || error || 'Unknown browser error')
-    .replace(/[\r\n]+/g, ' ')
-    .trim();
-  return detail.slice(0, 180) || 'Unknown browser error';
+function isActiveReauth(flow) {
+  return ['automating', 'duo-opening', 'pending', 'verifying'].includes(flow?.phase);
+}
+
+async function closeReauthTarget(flow) {
+  if (flow?.ownsWindow && Number.isInteger(flow.windowId)) {
+    await chrome.windows.remove(flow.windowId).catch(() => undefined);
+    return;
+  }
+  if (flow?.strategy === 'custom' || flow?.managedTab) {
+    if (Number.isInteger(flow.tabId)) await chrome.tabs.remove(flow.tabId).catch(() => undefined);
+    return;
+  }
+  if (Number.isInteger(flow?.windowId)) {
+    await chrome.windows.remove(flow.windowId).catch(() => undefined);
+  } else if (Number.isInteger(flow?.tabId)) {
+    await chrome.tabs.remove(flow.tabId).catch(() => undefined);
+  }
+}
+
+function scheduleCustomReauthTimeout(alarmInfo) {
+  try {
+    const result = chrome.alarms?.create?.(CUSTOM_REAUTH_TIMEOUT_ALARM, alarmInfo);
+    result?.catch?.(() => undefined);
+  } catch {
+    // Search and session checks must still work if alarms are unavailable.
+  }
+}
+
+function clearCustomReauthTimeout() {
+  try {
+    const result = chrome.alarms?.clear?.(CUSTOM_REAUTH_TIMEOUT_ALARM);
+    result?.catch?.(() => undefined);
+  } catch {
+    // Alarm cleanup is best effort; credentials also expire with the browser session.
+  }
+}
+
+async function clearCustomCredentials() {
+  customCredentialsClaimed = false;
+  await chrome.storage.session.remove(CUSTOM_CREDENTIALS_KEY).catch(() => undefined);
+  clearCustomReauthTimeout();
+}
+
+async function failCustomReauth(code) {
+  const flow = await getReauthFlow();
+  if (flow?.strategy !== 'custom' || !isActiveReauth(flow)) return;
+  const failureCode = Object.hasOwn(CUSTOM_REAUTH_ERROR_DETAILS, code) ? code : 'injection-failed';
+  await clearCustomCredentials();
+  await setReauthFlow({
+    ...flow,
+    phase: 'failed',
+    error: failureCode,
+    detail: CUSTOM_REAUTH_ERROR_DETAILS[failureCode],
+  });
+  await closeReauthTarget(flow);
+}
+
+async function focusActiveReauth(flow) {
+  if (flow?.strategy === 'custom' && flow.phase === 'automating') return true;
+  if (!Number.isInteger(flow?.windowId)) return false;
+  try {
+    await chrome.tabs.get(flow.tabId);
+    await chrome.windows.get(flow.windowId);
+    await chrome.windows.update(flow.windowId, { focused: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function startReauth() {
@@ -301,24 +396,16 @@ async function startReauth() {
     let windowId = null;
     try {
       const previous = await getReauthFlow();
-      if (Number.isInteger(previous?.windowId) && Number.isInteger(previous?.tabId)) {
-        if (['pending', 'verifying'].includes(previous.phase)) {
-          try {
-            await chrome.tabs.get(previous.tabId);
-            await chrome.windows.get(previous.windowId);
-            await chrome.windows.update(previous.windowId, { focused: true });
-            return { phase: previous.phase };
-          } catch {
-            await chrome.windows.remove(previous.windowId).catch(() => undefined);
-          }
-        } else {
-          await chrome.windows.remove(previous.windowId).catch(() => undefined);
-        }
+      if (isActiveReauth(previous) && await focusActiveReauth(previous)) {
+        return { phase: previous.phase, strategy: previous.strategy || 'official' };
       }
+      await closeReauthTarget(previous);
+      await clearCustomCredentials();
       reauthLandingAgain = false;
       reauthFinalDocumentSeen = false;
       await chrome.storage.session.remove(TSS_SESSION_CACHE_KEY).catch(() => undefined);
-      await setReauthFlow({ phase: 'pending', sawAcs: false, startedAt: Date.now() });
+      const startedAt = Date.now();
+      await setReauthFlow({ phase: 'pending', strategy: 'official', ownsWindow: true, sawAcs: false, startedAt });
       const loginWindow = await chrome.windows.create({
         url: 'about:blank', type: 'popup', width: 600, height: 800, focused: true,
       });
@@ -326,14 +413,16 @@ async function startReauth() {
       if (!Number.isInteger(windowId)) throw new Error('Sign-in window did not open');
       const [tab] = await chrome.tabs.query({ windowId });
       if (!Number.isInteger(tab?.id)) throw new Error('Sign-in tab did not open');
-      await setReauthFlow({ phase: 'pending', windowId, tabId: tab.id, sawAcs: false, startedAt: Date.now() });
+      await setReauthFlow({
+        phase: 'pending', strategy: 'official', ownsWindow: true,
+        windowId, tabId: tab.id, sawAcs: false, startedAt,
+      });
       await chrome.tabs.update(tab.id, { url: AUTH_START_URL });
       return { phase: 'pending' };
     } catch (error) {
-      const detail = getReauthErrorDetail(error);
-      console.error('Re-auth could not open the sign-in window:', detail);
+      const detail = 'Could not open the UCSD sign-in window.';
       if (windowId !== null) await chrome.windows.remove(windowId).catch(() => undefined);
-      await setReauthFlow({ phase: 'failed', error: 'window', detail }).catch(() => undefined);
+      await setReauthFlow({ phase: 'failed', strategy: 'official', error: 'window', detail }).catch(() => undefined);
       return { phase: 'failed', error: 'window', detail };
     }
   })();
@@ -344,6 +433,149 @@ async function startReauth() {
   }
 }
 
+async function startCustomReauth(username, password) {
+  if (customReauthStartPromise) return customReauthStartPromise;
+  customReauthStartPromise = (async () => {
+    let tab = null;
+    try {
+      const previous = await getReauthFlow();
+      if (isActiveReauth(previous)) return { phase: previous.phase, strategy: previous.strategy };
+      await closeReauthTarget(previous);
+      await clearCustomCredentials();
+      reauthLandingAgain = false;
+      reauthFinalDocumentSeen = false;
+      await chrome.storage.session.remove(TSS_SESSION_CACHE_KEY).catch(() => undefined);
+      await clearAuthFault();
+
+      const requiredHosts = ['tssproxy.ucsd.edu', 'a5.ucsd.edu'];
+      const scripts = chrome.runtime.getManifest().content_scripts || [];
+      const helperRegistered = requiredHosts.every((host) => scripts.some((script) =>
+        script.js?.includes('reauth-content.js') && script.matches?.includes(`https://${host}/*`)));
+      const hostAccess = await chrome.permissions.contains({
+        origins: requiredHosts.map((host) => `https://${host}/*`),
+      });
+      if (!helperRegistered || !hostAccess) {
+        const error = !helperRegistered ? 'helper-not-registered' : 'host-access-missing';
+        const detail = !helperRegistered
+          ? 'The loaded extension manifest does not register the sign-in helper. Reload UCSD EZPLAN on the browser extensions page and confirm it uses the updated project folder.'
+          : 'UCSD EZPLAN does not have access to tssproxy.ucsd.edu and a5.ucsd.edu. Check its site access on the browser extensions page and reload the extension.';
+        await setReauthFlow({ phase: 'failed', strategy: 'custom', error, detail });
+        return { phase: 'failed', strategy: 'custom', error, detail };
+      }
+
+      tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+      if (!Number.isInteger(tab?.id)) throw new Error('Could not create sign-in tab');
+      const flow = {
+        phase: 'automating',
+        strategy: 'custom',
+        managedTab: true,
+        ownsWindow: false,
+        windowId: tab.windowId,
+        tabId: tab.id,
+        sawAcs: false,
+        startedAt: Date.now(),
+      };
+      await setReauthFlow(flow);
+      await chrome.storage.session.set({
+        [CUSTOM_CREDENTIALS_KEY]: { username, password, expiresAt: Date.now() + 2 * 60 * 1000 },
+      });
+      scheduleCustomReauthTimeout({ delayInMinutes: 2 });
+      customCredentialsClaimed = false;
+      await chrome.tabs.update(tab.id, { url: CUSTOM_AUTH_START_URL });
+      return { phase: 'automating', strategy: 'custom' };
+    } catch {
+      await clearCustomCredentials();
+      if (Number.isInteger(tab?.id)) await chrome.tabs.remove(tab.id).catch(() => undefined);
+      const detail = 'Could not start the custom UCSD sign-in flow.';
+      await setReauthFlow({ phase: 'failed', strategy: 'custom', error: 'startup', detail }).catch(() => undefined);
+      return { phase: 'failed', strategy: 'custom', error: 'startup', detail };
+    }
+  })();
+  try {
+    return await customReauthStartPromise;
+  } finally {
+    customReauthStartPromise = null;
+  }
+}
+
+async function takeCustomReauthCredentials(sender) {
+  const senderUrl = sender?.url || sender?.tab?.url || '';
+  let origin = '';
+  try {
+    origin = new URL(senderUrl).origin;
+  } catch {
+    return null;
+  }
+  if (origin !== 'https://a5.ucsd.edu') return null;
+
+  const flow = await getReauthFlow();
+  if (flow?.strategy !== 'custom' || flow.phase !== 'automating' || flow.tabId !== sender?.tab?.id) return null;
+  if (customCredentialsClaimed) return null;
+  customCredentialsClaimed = true;
+
+  const { [CUSTOM_CREDENTIALS_KEY]: credentials } = await chrome.storage.session.get(CUSTOM_CREDENTIALS_KEY);
+  await chrome.storage.session.remove(CUSTOM_CREDENTIALS_KEY).catch(() => undefined);
+  if (!credentials
+      || !Number.isFinite(credentials.expiresAt)
+      || credentials.expiresAt <= Date.now()
+      || typeof credentials.username !== 'string'
+      || typeof credentials.password !== 'string') return null;
+
+  const current = await getReauthFlow();
+  if (current?.strategy !== 'custom' || current.phase !== 'automating' || current.tabId !== sender.tab.id) return null;
+  return { username: credentials.username, password: credentials.password };
+}
+
+async function handleCustomReauthNavigation(tabId, change, tab) {
+  const navigationUrl = change.url || (change.status === 'loading' && tab.pendingUrl) || tab.url || tab.pendingUrl;
+  if (!['loading', 'complete'].includes(change.status) || !navigationUrl) return;
+  let url;
+  try {
+    url = new URL(navigationUrl);
+  } catch {
+    return;
+  }
+
+  const flow = await getReauthFlow();
+  if (flow?.strategy !== 'custom' || flow.tabId !== tabId) return;
+  if (url.hostname === DUO_HOST && flow.phase === 'automating') {
+    if (customDuoOpeningTabs.has(tabId)) return;
+    customDuoOpeningTabs.add(tabId);
+    try {
+      const currentFlow = await getReauthFlow();
+      if (currentFlow?.strategy !== 'custom' || currentFlow.tabId !== tabId || currentFlow.phase !== 'automating') return;
+      await setReauthFlow({ ...currentFlow, phase: 'duo-opening' });
+      const popup = await chrome.windows.create({
+        tabId,
+        type: 'popup',
+        width: 600,
+        height: 800,
+        focused: true,
+      });
+      const current = await getReauthFlow();
+      if (current?.strategy !== 'custom' || current.tabId !== tabId || current.phase !== 'duo-opening') {
+        if (Number.isInteger(popup?.id)) await chrome.windows.remove(popup.id).catch(() => undefined);
+        return;
+      }
+      await setReauthFlow({
+        ...current,
+        phase: 'pending',
+        ownsWindow: true,
+        windowId: popup.id,
+        duoOpened: true,
+      });
+    } catch {
+      await failCustomReauth('duo-window-failed');
+    } finally {
+      customDuoOpeningTabs.delete(tabId);
+    }
+    return;
+  }
+
+  // The sign-in helper is a document_end content script. Its messages are
+  // gated by the active custom flow and this tab's ID in the message router.
+}
+
 async function finishReauth(tabId, finalDocument = false) {
   const flow = await getReauthFlow();
   if (flow?.tabId !== tabId) return;
@@ -352,18 +584,29 @@ async function finishReauth(tabId, finalDocument = false) {
     if (finalDocument) reauthFinalDocumentSeen = true;
     return;
   }
-  if (flow.phase !== 'pending') return;
+  if (!['automating', 'pending'].includes(flow.phase)) return;
   await setReauthFlow({ ...flow, phase: 'verifying' });
   await authCaptureQueue;
   const verification = await verifyTssSession(true);
   const current = await getReauthFlow();
-  if (current?.windowId !== flow.windowId || current?.phase !== 'verifying') return;
+  if (current?.tabId !== tabId || current?.startedAt !== flow.startedAt || current?.phase !== 'verifying') return;
   if (!verification.connected) {
     const retry = reauthLandingAgain;
     const finalLanding = finalDocument || reauthFinalDocumentSeen;
     reauthLandingAgain = false;
     reauthFinalDocumentSeen = false;
-    await setReauthFlow({ ...flow, phase: finalLanding ? 'failed' : 'pending', error: finalLanding ? verification.error : undefined });
+    await setReauthFlow({
+      ...flow,
+      phase: finalLanding ? 'failed' : flow.strategy === 'custom' ? 'automating' : 'pending',
+      error: finalLanding ? verification.error : undefined,
+      detail: finalLanding && flow.strategy === 'custom'
+        ? 'The TSS session could not be confirmed after sign-in.'
+        : undefined,
+    });
+    if (finalLanding && flow.strategy === 'custom') {
+      await clearCustomCredentials();
+      await closeReauthTarget(flow);
+    }
     if (retry && !finalLanding) finishReauth(tabId).catch(() => undefined);
     return;
   }
@@ -371,7 +614,8 @@ async function finishReauth(tabId, finalDocument = false) {
   reauthFinalDocumentSeen = false;
   await clearAuthFault();
   await setReauthFlow({ phase: 'connected', completedAt: Date.now() });
-  await chrome.windows.remove(flow.windowId).catch(() => undefined);
+  await clearCustomCredentials();
+  await closeReauthTarget(flow);
 }
 
 async function handleReauthNavigation(tabId, change, tab) {
@@ -380,7 +624,7 @@ async function handleReauthNavigation(tabId, change, tab) {
     const landing = new URL(change.url || tab.url || tab.pendingUrl);
     if (landing.origin !== 'https://tss.ucsd.edu') return;
     const flow = await getReauthFlow();
-    if (flow?.tabId !== tabId || !['pending', 'verifying'].includes(flow.phase)) return;
+    if (flow?.tabId !== tabId || !['automating', 'pending', 'verifying'].includes(flow.phase)) return;
     if (landing.pathname === '/sap/saml2/sp/acs/500') {
       if (!flow.sawAcs) await setReauthFlow({ ...flow, sawAcs: true });
     } else if (landing.pathname === '/fiori' && flow.sawAcs && change.status === 'complete') {
@@ -393,23 +637,49 @@ async function handleReauthNavigation(tabId, change, tab) {
 
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   handleReauthNavigation(tabId, change, tab).catch(() => undefined);
+  handleCustomReauthNavigation(tabId, change, tab).catch(() => undefined);
 });
 
 chrome.windows.onRemoved.addListener((windowId) => {
   getReauthFlow().then((flow) => {
-    if (flow?.windowId === windowId && ['pending', 'verifying'].includes(flow.phase)) {
-      return setReauthFlow({ phase: 'cancelled' });
+    if (flow?.windowId === windowId && isActiveReauth(flow)) {
+      clearCustomCredentials().catch(() => undefined);
+      return setReauthFlow({ phase: 'cancelled', strategy: flow.strategy });
     }
   }).catch(() => undefined);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   getReauthFlow().then((flow) => {
-    if (flow?.tabId === tabId && ['pending', 'verifying'].includes(flow.phase)) {
-      return setReauthFlow({ phase: 'cancelled' });
+    if (flow?.tabId === tabId && isActiveReauth(flow)) {
+      clearCustomCredentials().catch(() => undefined);
+      return setReauthFlow({ phase: 'cancelled', strategy: flow.strategy });
     }
   }).catch(() => undefined);
 });
+
+try {
+  chrome.alarms?.onAlarm?.addListener((alarm) => {
+    if (alarm.name !== CUSTOM_REAUTH_TIMEOUT_ALARM) return;
+    chrome.storage.session.get(CUSTOM_CREDENTIALS_KEY).then(async (stored) => {
+      const credentials = stored[CUSTOM_CREDENTIALS_KEY];
+      const flow = await getReauthFlow();
+      const now = Date.now();
+      if (flow?.strategy === 'custom'
+          && flow.phase === 'automating'
+          && Number.isFinite(flow.startedAt)) {
+        const deadline = Math.min(
+          flow.startedAt + 2 * 60 * 1000,
+          Number.isFinite(credentials?.expiresAt) ? credentials.expiresAt : Infinity,
+        );
+        if (deadline > now) scheduleCustomReauthTimeout({ when: deadline });
+        else await failCustomReauth(flow.automationHost ? 'flow-timeout' : 'helper-not-loaded');
+      }
+    }).catch(() => undefined);
+  });
+} catch {
+  // The service worker still registers its message handlers without alarms.
+}
 
 // ----- Multipart / JSON parsing helpers -----
 function extractJson(text) {
@@ -500,6 +770,9 @@ async function searchClasses(term, query) {
     `--${boundary}--\r\n`;
 
   let resp;
+  let text;
+  const controller = new AbortController();
+  const requestTimeout = setTimeout(() => controller.abort(), 25000);
   try {
     resp = await fetch(`${MODULE_BASE}/$batch?sap-client=500`, {
       method: 'POST',
@@ -516,17 +789,17 @@ async function searchClasses(term, query) {
       credentials: 'include',
       redirect: 'manual',
       body,
+      signal: controller.signal,
     });
+    if (isAuthResponse(resp)) return { error: 'auth-expired', status: resp.status };
+    if (!resp.ok) return { error: 'http', status: resp.status };
+    text = await resp.text();
   } catch (e) {
     return { error: 'network', message: e.message };
+  } finally {
+    clearTimeout(requestTimeout);
   }
 
-  if (isAuthResponse(resp)) {
-    return { error: 'auth-expired', status: resp.status };
-  }
-  if (!resp.ok) return { error: 'http', status: resp.status };
-
-  const text = await resp.text();
   const innerError = batchError(text);
   if (innerError) return innerError;
   const raw = parseBatchResponse(text);
@@ -730,18 +1003,147 @@ async function getRequirements(moduleID) {
   return { requirements: (obj && obj.value) || [] };
 }
 
+// Only fixed diagnostic fields leave the worker: no credentials, cookies,
+// page contents, query strings, SAML payloads, or CSRF tokens.
+async function getReauthDiagnostics() {
+  const flow = await getReauthFlow();
+  const manifest = chrome.runtime.getManifest();
+  const report = {
+    revision: 'intercept-diagnostics-1',
+    extensionId: chrome.runtime.id,
+    version: manifest.version,
+    helperRegistration: (manifest.content_scripts || [])
+      .filter((script) => script.js?.includes('reauth-content.js'))
+      .map(({ matches, run_at }) => ({ matches, runAt: run_at || 'document_idle' })),
+    hostAccess: {},
+    flow: flow ? {
+      strategy: flow.strategy, phase: flow.phase,
+      stage: flow.automationStage || null, host: flow.automationHost || null,
+      error: flow.error || null,
+    } : null,
+    tab: null,
+    helper: { status: 'not-probed' },
+  };
+  for (const host of ['tssproxy.ucsd.edu', 'a5.ucsd.edu']) {
+    report.hostAccess[host] = await chrome.permissions.contains({ origins: [`https://${host}/*`] });
+  }
+  if (!Number.isInteger(flow?.tabId)) return report;
+  let tab;
+  try {
+    tab = await chrome.tabs.get(flow.tabId);
+  } catch {
+    report.tab = { status: 'closed-or-unavailable' };
+    return report;
+  }
+  let host = null;
+  try { host = new URL(tab.url || tab.pendingUrl).hostname; } catch { /* URL may be withheld. */ }
+  report.tab = { host, status: tab.status || 'unknown' };
+  let timeout;
+  try {
+    const response = await Promise.race([
+      chrome.tabs.sendMessage(tab.id, { type: 'probeCustomReauthHelper' }, { frameId: 0 }),
+      new Promise((resolve) => { timeout = setTimeout(() => resolve(null), 2000); }),
+    ]);
+    report.helper = response ? {
+      status: 'responded', revision: response.revision,
+      stage: response.stage, handshake: response.handshake,
+      messagingError: response.messagingError, failure: response.failure,
+      readyState: response.readyState,
+    } : { status: 'no-response' };
+  } catch {
+    report.helper = { status: 'no-receiver-or-tab-navigating' };
+  } finally {
+    clearTimeout(timeout);
+  }
+  return report;
+}
+
 // ----- Message router -----
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'getReauthDiagnostics') {
+    if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) return false;
+    getReauthDiagnostics().then(sendResponse).catch(() => sendResponse({ error: 'diagnostics-unavailable' }));
+    return true;
+  }
+  if (msg.type === 'requestCustomReauthCredentials') {
+    takeCustomReauthCredentials(sender).then(async (credentials) => {
+      if (credentials) {
+        sendResponse(credentials);
+        return;
+      }
+      const senderUrl = sender?.url || sender?.tab?.url || '';
+      let senderOrigin = '';
+      try { senderOrigin = new URL(senderUrl).origin; } catch { /* ignore malformed sender URLs */ }
+      const flow = await getReauthFlow();
+      if (senderOrigin === 'https://a5.ucsd.edu'
+          && flow?.strategy === 'custom'
+          && flow.phase === 'automating'
+          && flow.tabId === sender?.tab?.id) {
+        await failCustomReauth('credentials-unavailable');
+      }
+      sendResponse({ error: 'credentials-unavailable' });
+    }).catch(() => sendResponse({ error: 'credentials-unavailable' }));
+    return true;
+  }
+  if (msg.type === 'customReauthAutomationProgress') {
+    (async () => {
+      const flow = await getReauthFlow();
+      const senderUrl = sender?.url || sender?.tab?.url || '';
+      let senderHost = '';
+      try { senderHost = new URL(senderUrl).hostname; } catch { /* ignore malformed sender URLs */ }
+      const allowedStages = CUSTOM_REAUTH_AUTOMATION_STAGES[senderHost];
+      const accepted = flow?.strategy === 'custom'
+        && flow.phase === 'automating'
+        && flow.tabId === sender?.tab?.id
+        && allowedStages?.has(msg.stage) === true;
+      if (!accepted) {
+        const reason = flow?.strategy !== 'custom' ? 'no-custom-flow'
+          : flow.phase !== 'automating' ? 'flow-not-automating'
+          : flow.tabId !== sender?.tab?.id ? 'wrong-tab'
+          : 'host-or-stage-not-allowed';
+        sendResponse({ accepted: false, reason });
+        return;
+      }
+      await setReauthFlow({
+        ...flow,
+        automationHost: senderHost,
+        automationStage: msg.stage,
+        automationAt: Date.now(),
+      });
+      sendResponse({ accepted: true });
+    })().catch(() => sendResponse({ accepted: false, reason: 'worker-handler-error' }));
+    return true;
+  }
+  if (msg.type === 'customReauthAutomationError') {
+    (async () => {
+      const flow = await getReauthFlow();
+      const senderUrl = sender?.url || sender?.tab?.url || '';
+      let senderOrigin = '';
+      try { senderOrigin = new URL(senderUrl).origin; } catch { /* ignore malformed sender URLs */ }
+      if (flow?.strategy === 'custom'
+          && flow.tabId === sender?.tab?.id
+          && ['https://tssproxy.ucsd.edu', 'https://a5.ucsd.edu'].includes(senderOrigin)) {
+        const code = typeof msg.code === 'string' && Object.hasOwn(CUSTOM_REAUTH_ERROR_DETAILS, msg.code)
+          ? msg.code
+          : 'injection-failed';
+        await failCustomReauth(code);
+      }
+      sendResponse({ received: true });
+    })().catch(() => sendResponse({ received: false }));
+    return true;
+  }
   if (msg.type === 'tssFioriReady') {
-    const tabId = _sender.tab?.id;
-    if (tabId && _sender.url?.startsWith('https://tss.ucsd.edu/fiori')) {
+    const tabId = sender.tab?.id;
+    if (tabId && sender.url?.startsWith('https://tss.ucsd.edu/fiori')) {
       finishReauth(tabId, true).catch(() => undefined);
     }
     sendResponse({ received: true });
     return false;
   }
   if (msg.type === 'searchClasses') {
-    trackApiResult(msg.type, searchClasses(msg.term, msg.query)).then(sendResponse);
+    trackApiResult(msg.type, searchClasses(msg.term, msg.query))
+      .then(sendResponse)
+      .catch(() => sendResponse({ error: 'background' }));
     return true;
   }
   if (msg.type === 'getSections') {
@@ -766,21 +1168,43 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg.type === 'getSessionStatus') {
-    getSessionStatus().then(sendResponse);
+    getSessionStatus()
+      .then(sendResponse)
+      .catch(() => sendResponse({ connected: false, error: 'background' }));
     return true;
   }
   if (msg.type === 'startReauth') {
-    console.info('Re-auth request received');
     const flow = startReauth();
     // Reply before the sign-in window takes focus; Chrome may close an action
     // popup as soon as that browser window opens.
     sendResponse({ phase: 'pending' });
-    flow.catch((error) => {
-      const detail = getReauthErrorDetail(error);
-      console.error('Re-auth startup failed unexpectedly:', detail);
-      setReauthFlow({ phase: 'failed', error: 'background', detail }).catch(() => undefined);
-    });
+    flow.catch(() => setReauthFlow({
+      phase: 'failed', strategy: 'official', error: 'background',
+      detail: 'Could not start the UCSD sign-in window.',
+    }).catch(() => undefined));
     return false;
+  }
+  if (msg.type === 'startCustomReauth') {
+    if (typeof msg.username !== 'string' || typeof msg.password !== 'string'
+        || !msg.username.trim() || !msg.password
+        || msg.username.length > 256 || msg.password.length > 1024) {
+      msg.username = '';
+      msg.password = '';
+      sendResponse({ phase: 'failed', error: 'credentials', detail: 'Enter a UCSD username and password.' });
+      return false;
+    }
+    let username = msg.username.trim();
+    let password = msg.password;
+    msg.username = '';
+    msg.password = '';
+    const flow = startCustomReauth(username, password);
+    username = '';
+    password = '';
+    flow.then(sendResponse).catch(async () => {
+      await failCustomReauth('injection-failed').catch(() => undefined);
+      sendResponse({ phase: 'failed', strategy: 'custom', detail: 'Could not start the custom UCSD sign-in flow.' });
+    });
+    return true;
   }
   return false;
 });

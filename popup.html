@@ -18,6 +18,7 @@
       <div id="term-badge" class="term-badge" title="Current term">—</div>
       <button id="open-planner" class="btn btn-small">Full planner</button>
       <div class="topbar-right">
+        <button id="reauth-mode-toggle" class="reauth-mode-toggle" type="button" role="switch" aria-checked="false" aria-label="Re-auth method: Intercept" title="Re-auth method: Intercept (I)">I</button>
         <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-checked="true" aria-label="Toggle light mode" title="Toggle light/dark mode">
           <span class="theme-toggle-knob"></span>
         </button>
@@ -35,6 +36,11 @@
       <span class="auth-icon">!</span>
       <span id="auth-text" class="auth-text"></span>
       <button id="reauth-btn" class="btn btn-small auth-action hidden" type="button">Re-auth</button>
+      <button id="auth-diagnostics-btn" class="btn btn-small auth-action" type="button">Copy sign-in diagnostics</button>
+      <details id="auth-diagnostics" class="auth-diagnostics hidden">
+        <summary>Sign-in diagnostics (no credentials or tokens)</summary>
+        <textarea id="auth-diagnostics-output" aria-label="Sign-in diagnostics" readonly rows="10"></textarea>
+      </details>
     </div>
 
     <div id="search-results" class="search-results hidden">
@@ -119,6 +125,23 @@
     </section>
 
   </div>
+  <dialog id="reauth-dialog" class="reauth-dialog" aria-labelledby="reauth-dialog-title">
+    <form id="reauth-form">
+      <h2 id="reauth-dialog-title">Sign in to UCSD</h2>
+      <p>Credentials stay in temporary extension memory and are sent to UCSD sign-in. They are not saved between browser sessions.</p>
+      <label class="reauth-field" for="reauth-username">UCSD username
+        <input id="reauth-username" name="username" type="text" autocomplete="username" required maxlength="256">
+      </label>
+      <label class="reauth-field" for="reauth-password">Password
+        <input id="reauth-password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+      </label>
+      <div id="reauth-form-error" class="reauth-form-error hidden" role="alert"></div>
+      <div class="reauth-dialog-actions">
+        <button id="reauth-cancel" class="btn btn-small" type="button">Cancel</button>
+        <button class="btn btn-primary" type="submit">Continue</button>
+      </div>
+    </form>
+  </dialog>
   <script src="popup.js"></script>
 </body>
 </html>

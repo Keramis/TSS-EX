@@ -5,6 +5,7 @@ param(
 $runtimeFiles = @(
   'manifest.json',
   'background.js',
+  'reauth-content.js',
   'content.js',
   'popup.js',
   'popup.html',

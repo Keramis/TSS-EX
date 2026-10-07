@@ -212,6 +212,29 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   gap: 8px;
   flex-shrink: 0;
 }
+.reauth-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  color: var(--teal-text);
+  background: var(--teal-wash);
+  border: 1px solid var(--teal-line);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.reauth-mode-toggle.official {
+  color: var(--warn-text);
+  background: var(--warn-wash);
+  border-color: var(--warn-border);
+}
+.reauth-mode-toggle:focus-visible { outline: 2px solid var(--teal-line); outline-offset: 2px; }
 
 .theme-toggle {
   display: inline-flex;
@@ -325,6 +348,7 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
 .auth-banner {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 8px 14px;
   background: var(--warn-wash);
@@ -355,6 +379,40 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
 .auth-text a { color: var(--teal-text); cursor: pointer; }
 .auth-text a:hover { text-decoration: underline; }
 .auth-action { flex-shrink: 0; white-space: nowrap; }
+.auth-diagnostics { flex-basis: 100%; min-width: 0; }
+.auth-diagnostics textarea {
+  width: 100%; box-sizing: border-box; margin-top: 8px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border-strong);
+  font: 11px monospace; resize: vertical;
+}
+.reauth-dialog {
+  width: min(420px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  padding: 22px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--modal-shadow);
+}
+.reauth-dialog::backdrop { background: var(--backdrop); }
+.reauth-dialog h2 { margin-bottom: 8px; font-size: 18px; }
+.reauth-dialog p { margin-bottom: 16px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.reauth-field { display: block; margin-top: 12px; color: var(--text); font-size: 13px; }
+.reauth-field input {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 9px 10px;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+.reauth-field input:focus { outline: 2px solid var(--focus-ring); border-color: var(--teal-line); }
+.reauth-form-error { margin-top: 12px; color: var(--danger); font-size: 12px; }
+.reauth-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 
 /* ===== Search results ===== */
 .search-results {

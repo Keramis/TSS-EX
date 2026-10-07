@@ -3,8 +3,13 @@
   "name": "UCSD EZPLAN",
   "version": "0.1.0",
   "description": "A better class search and planning interface for UCSD's TSS registration platform.",
-  "permissions": ["storage", "webRequest", "sidePanel"],
-  "host_permissions": ["https://tss.ucsd.edu/*"],
+  "permissions": ["storage", "webRequest", "sidePanel", "alarms"],
+  "host_permissions": [
+    "https://tss.ucsd.edu/*",
+    "https://tssproxy.ucsd.edu/*",
+    "https://a5.ucsd.edu/*",
+    "https://api-ce13a1a7.duosecurity.com/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -13,6 +18,11 @@
     {
       "matches": ["https://tss.ucsd.edu/fiori*"],
       "js": ["content.js"]
+    },
+    {
+      "matches": ["https://tssproxy.ucsd.edu/*", "https://a5.ucsd.edu/*"],
+      "js": ["reauth-content.js"],
+      "run_at": "document_end"
     }
   ],
   "action": {
