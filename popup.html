@@ -46,6 +46,7 @@
       <span class="auth-icon">!</span>
       <span id="auth-text" class="auth-text"></span>
       <button id="reauth-btn" class="btn btn-small auth-action hidden" type="button">Re-auth</button>
+      <button id="clear-saved-password-btn" class="btn btn-small auth-action hidden" type="button" title="Remove the saved Intercept password from this browser session">clear saved password</button>
       <button id="auth-diagnostics-btn" class="btn btn-small auth-action" type="button">Copy sign-in diagnostics</button>
       <details id="auth-diagnostics" class="auth-diagnostics hidden">
         <summary>Sign-in diagnostics (no credentials or tokens)</summary>
@@ -138,12 +139,17 @@
   <dialog id="reauth-dialog" class="reauth-dialog" aria-labelledby="reauth-dialog-title">
     <form id="reauth-form">
       <h2 id="reauth-dialog-title">Sign in to UCSD</h2>
-      <p>Credentials stay in temporary extension memory and are sent to UCSD sign-in. They are not saved between browser sessions.</p>
+      <p>Your username is remembered. Select the session option below to keep the password in extension memory for this browser session; it is cleared when the browser is fully closed or EZPLAN is reloaded.</p>
       <label class="reauth-field" for="reauth-username">UCSD username
         <input id="reauth-username" name="username" type="text" autocomplete="username" required maxlength="256">
       </label>
       <label class="reauth-field" for="reauth-password">Password
-        <input id="reauth-password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+        <input id="reauth-password" name="password" type="password" autocomplete="current-password" maxlength="1024">
+      </label>
+      <label class="reauth-save-password" for="reauth-save-password" title="Saves the password for this browser session. It is cleared when you fully close and reopen the browser or reload EZPLAN.">
+        <input id="reauth-save-password" name="savePassword" type="checkbox" title="Saves the password for this browser session. It is cleared when you fully close and reopen the browser or reload EZPLAN.">
+        <span>save password (session)</span>
+        <span class="reauth-save-password-help" aria-hidden="true" title="Saves the password for this browser session. It is cleared when you fully close and reopen the browser or reload EZPLAN.">?</span>
       </label>
       <div id="reauth-form-error" class="reauth-form-error hidden" role="alert"></div>
       <div class="reauth-dialog-actions">

@@ -475,6 +475,30 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
   font: inherit;
 }
 .reauth-field input:focus { outline: 2px solid var(--focus-ring); border-color: var(--teal-line); }
+.reauth-save-password {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  margin-top: 12px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.reauth-save-password input { margin: 0; accent-color: var(--teal-line); }
+.reauth-save-password-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: help;
+}
 .reauth-form-error { margin-top: 12px; color: var(--danger); font-size: 12px; }
 .reauth-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 

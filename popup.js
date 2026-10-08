@@ -8,6 +8,7 @@ const showFinals = true;
 let isPlanner = false;
 let selectedDetailId = null;
 let authCheckSequence = 0;
+let savedCustomPasswordAvailable = false;
 let activeRefreshId = null;
 let fullRefreshStarting = false;
 let observedRefreshId = null;
@@ -1685,9 +1686,13 @@ function showAuthBanner(mode, extra, strategy = null, reauthStep = null) {
   const banner = document.getElementById('auth-banner');
   const text = document.getElementById('auth-text');
   const button = document.getElementById('reauth-btn');
+  const clearPasswordButton = document.getElementById('clear-saved-password-btn');
   banner.classList.remove('hidden', 'danger');
   banner.dataset.reauthPhase = mode;
-  button.classList.toggle('hidden', ['checking', 'automating', 'duo-opening', 'verifying'].includes(mode));
+  const reauthStarting = ['checking', 'automating', 'duo-opening', 'verifying'].includes(mode);
+  const flowActive = reauthStarting || mode === 'pending';
+  button.classList.toggle('hidden', reauthStarting);
+  clearPasswordButton.classList.toggle('hidden', flowActive || !savedCustomPasswordAvailable);
   button.textContent = mode === 'pending' ? 'Open sign-in' : 'Re-auth';
   if (mode === 'checking') {
     text.textContent = 'Checking TSS connection...';
@@ -2214,8 +2219,48 @@ document.addEventListener('DOMContentLoaded', async () => {
   const reauthForm = document.getElementById('reauth-form');
   const reauthUsername = document.getElementById('reauth-username');
   const reauthPassword = document.getElementById('reauth-password');
+  const reauthSavePassword = document.getElementById('reauth-save-password');
   const reauthFormError = document.getElementById('reauth-form-error');
   const reauthSubmit = reauthForm.querySelector('button[type="submit"]');
+  const clearSavedPasswordButton = document.getElementById('clear-saved-password-btn');
+
+  const refreshSavedReauthSettings = async () => {
+    const [{ reauthUsername: savedUsername }, credentialState] = await Promise.all([
+      chrome.storage.local.get('reauthUsername'),
+      sendRuntimeMessage({ type: 'getCustomReauthCredentialState' })
+        .catch(() => ({ savedPassword: savedCustomPasswordAvailable })),
+    ]);
+    savedCustomPasswordAvailable = credentialState?.savedPassword === true;
+    if (!reauthDialog.open) {
+      reauthUsername.value = typeof savedUsername === 'string' ? savedUsername : '';
+      reauthSavePassword.checked = savedCustomPasswordAvailable;
+      reauthPassword.placeholder = savedCustomPasswordAvailable ? 'Leave blank to use saved password' : '';
+    }
+    const phase = document.getElementById('auth-banner').dataset.reauthPhase;
+    const flowActive = ['checking', 'automating', 'duo-opening', 'pending', 'verifying'].includes(phase);
+    clearSavedPasswordButton.classList.toggle('hidden', flowActive || !savedCustomPasswordAvailable);
+  };
+
+  refreshSavedReauthSettings().catch(() => undefined);
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.reauthUsername && !reauthDialog.open) {
+      reauthUsername.value = typeof changes.reauthUsername.newValue === 'string'
+        ? changes.reauthUsername.newValue
+        : '';
+    }
+    if (area === 'session' && changes.savedCustomReauthPassword) {
+      savedCustomPasswordAvailable = typeof changes.savedCustomReauthPassword.newValue === 'string'
+        && Boolean(changes.savedCustomReauthPassword.newValue);
+      const phase = document.getElementById('auth-banner').dataset.reauthPhase;
+      const flowActive = ['checking', 'automating', 'duo-opening', 'pending', 'verifying'].includes(phase);
+      clearSavedPasswordButton.classList.toggle('hidden', flowActive || !savedCustomPasswordAvailable);
+      if (!reauthDialog.open) {
+        reauthSavePassword.checked = savedCustomPasswordAvailable;
+        reauthPassword.placeholder = savedCustomPasswordAvailable ? 'Leave blank to use saved password' : '';
+      }
+    }
+  });
+
   reauthModeToggle.addEventListener('click', () => {
     const previous = reauthUseOfficialPopup;
     const next = !previous;
@@ -2248,8 +2293,26 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     reauthFormError.textContent = '';
     reauthFormError.classList.add('hidden');
+    await refreshSavedReauthSettings().catch(() => undefined);
     reauthDialog.showModal();
     reauthUsername.focus();
+  });
+
+  clearSavedPasswordButton.addEventListener('click', async () => {
+    clearSavedPasswordButton.disabled = true;
+    try {
+      const result = await sendRuntimeMessage({ type: 'clearSavedCustomReauthPassword' });
+      if (result?.error) throw new Error(result.error);
+      savedCustomPasswordAvailable = false;
+      reauthSavePassword.checked = false;
+      reauthPassword.value = '';
+      reauthPassword.placeholder = '';
+      clearSavedPasswordButton.classList.add('hidden');
+    } catch {
+      document.getElementById('auth-text').textContent = 'Could not clear the saved password. Reload the extension and try again.';
+    } finally {
+      clearSavedPasswordButton.disabled = false;
+    }
   });
 
   document.getElementById('reauth-cancel').addEventListener('click', () => reauthDialog.close());
@@ -2270,7 +2333,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     let username = reauthUsername.value.trim();
     let password = reauthPassword.value;
-    if (!username || !password) {
+    const savePassword = reauthSavePassword.checked;
+    const useSavedPassword = savePassword && savedCustomPasswordAvailable && !password;
+    if (!username || (!password && !useSavedPassword)) {
       reauthFormError.textContent = 'Enter your UCSD username and password.';
       reauthFormError.classList.remove('hidden');
       reauthForm.dataset.busy = 'false';
@@ -2279,7 +2344,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     try {
-      const responsePromise = sendRuntimeMessage({ type: 'startCustomReauth', username, password });
+      const responsePromise = sendRuntimeMessage({
+        type: 'startCustomReauth', username, password, savePassword, useSavedPassword,
+      });
       username = '';
       password = '';
       reauthUsername.value = '';

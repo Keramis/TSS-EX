@@ -10,6 +10,7 @@ const AUTH_START_URL = 'https://sis.ucsd.edu/';
 const CUSTOM_AUTH_START_URL = 'https://tss.ucsd.edu/fiori';
 const DUO_HOST = 'api-ce13a1a7.duosecurity.com';
 const CUSTOM_CREDENTIALS_KEY = 'customReauthCredentials';
+const SAVED_CUSTOM_PASSWORD_KEY = 'savedCustomReauthPassword';
 const CUSTOM_REAUTH_TIMEOUT_ALARM = 'customReauthTimeout';
 const CUSTOM_REAUTH_ERROR_DETAILS = {
   'proxy-choice-not-found': 'Could not select UCSD SSO on the TSS sign-in page.',
@@ -23,6 +24,13 @@ const CUSTOM_REAUTH_ERROR_DETAILS = {
   'duo-window-failed': 'Could not open the Duo prompt window.',
   'flow-timeout': 'UCSD sign-in did not reach Duo or TSS in time. Try the official popup.',
 };
+
+try {
+  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => undefined);
+} catch {
+  // Session storage is private to extension contexts by default.
+}
+
 const CUSTOM_REAUTH_AUTOMATION_STAGES = {
   'tssproxy.ucsd.edu': new Set(['helper-loaded', 'chooser-found']),
   'a5.ucsd.edu': new Set(['helper-loaded', 'credential-form-found', 'credentials-submitting']),
@@ -365,6 +373,17 @@ async function clearCustomCredentials() {
   clearCustomReauthTimeout();
 }
 
+async function getSavedCustomPassword() {
+  const { [SAVED_CUSTOM_PASSWORD_KEY]: password } = await chrome.storage.session.get(SAVED_CUSTOM_PASSWORD_KEY);
+  return typeof password === 'string' && password ? password : '';
+}
+
+function isExtensionPageSender(sender) {
+  return sender?.id === chrome.runtime.id
+    && typeof sender.url === 'string'
+    && sender.url.startsWith(chrome.runtime.getURL(''));
+}
+
 async function failCustomReauth(code) {
   const flow = await getReauthFlow();
   if (flow?.strategy !== 'custom' || !isActiveReauth(flow)) return;
@@ -435,15 +454,20 @@ async function startReauth() {
   }
 }
 
-async function startCustomReauth(username, password) {
+async function startCustomReauth(username, password, { savePassword = false, useSavedPassword = false } = {}) {
   if (customReauthStartPromise) return customReauthStartPromise;
   customReauthStartPromise = (async () => {
     let tab = null;
+    let effectivePassword = password;
     try {
+      await chrome.storage.local.set({ reauthUsername: username });
       const previous = await getReauthFlow();
       if (isActiveReauth(previous)) return { phase: previous.phase, strategy: previous.strategy };
       await closeReauthTarget(previous);
       await clearCustomCredentials();
+      if (!savePassword && !useSavedPassword) {
+        await chrome.storage.session.remove(SAVED_CUSTOM_PASSWORD_KEY);
+      }
       reauthLandingAgain = false;
       reauthFinalDocumentSeen = false;
       await chrome.storage.session.remove(TSS_SESSION_CACHE_KEY).catch(() => undefined);
@@ -465,6 +489,12 @@ async function startCustomReauth(username, password) {
         return { phase: 'failed', strategy: 'custom', error, detail };
       }
 
+      if (!effectivePassword && useSavedPassword) effectivePassword = await getSavedCustomPassword();
+      if (!effectivePassword) {
+        const detail = 'Enter your UCSD password or use the saved session password.';
+        await setReauthFlow({ phase: 'failed', strategy: 'custom', error: 'credentials', detail });
+        return { phase: 'failed', strategy: 'custom', error: 'credentials', detail };
+      }
       tab = await chrome.tabs.create({ url: 'about:blank', active: false });
       if (!Number.isInteger(tab?.id)) throw new Error('Could not create sign-in tab');
       const flow = {
@@ -478,19 +508,25 @@ async function startCustomReauth(username, password) {
         startedAt: Date.now(),
       };
       await setReauthFlow(flow);
-      await chrome.storage.session.set({
-        [CUSTOM_CREDENTIALS_KEY]: { username, password, expiresAt: Date.now() + 2 * 60 * 1000 },
-      });
+      const sessionValues = {
+        [CUSTOM_CREDENTIALS_KEY]: { username, password: effectivePassword, expiresAt: Date.now() + 2 * 60 * 1000 },
+      };
+      if (savePassword) sessionValues[SAVED_CUSTOM_PASSWORD_KEY] = effectivePassword;
+      await chrome.storage.session.set(sessionValues);
       scheduleCustomReauthTimeout({ delayInMinutes: 2 });
       customCredentialsClaimed = false;
       await chrome.tabs.update(tab.id, { url: CUSTOM_AUTH_START_URL });
       return { phase: 'automating', strategy: 'custom' };
     } catch {
+      effectivePassword = '';
       await clearCustomCredentials();
       if (Number.isInteger(tab?.id)) await chrome.tabs.remove(tab.id).catch(() => undefined);
       const detail = 'Could not start the custom UCSD sign-in flow.';
       await setReauthFlow({ phase: 'failed', strategy: 'custom', error: 'startup', detail }).catch(() => undefined);
       return { phase: 'failed', strategy: 'custom', error: 'startup', detail };
+    } finally {
+      password = '';
+      effectivePassword = '';
     }
   })();
   try {
@@ -1207,6 +1243,25 @@ async function getReauthDiagnostics() {
 
 // ----- Message router -----
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'getCustomReauthCredentialState') {
+    if (!isExtensionPageSender(sender)) return false;
+    getSavedCustomPassword()
+      .then((password) => sendResponse({ savedPassword: Boolean(password) }))
+      .catch(() => sendResponse({ savedPassword: false }));
+    return true;
+  }
+  if (msg.type === 'clearSavedCustomReauthPassword') {
+    if (!isExtensionPageSender(sender)) return false;
+    getReauthFlow().then(async (flow) => {
+      if (isActiveReauth(flow)) {
+        sendResponse({ error: 'flow-active' });
+        return;
+      }
+      await chrome.storage.session.remove(SAVED_CUSTOM_PASSWORD_KEY);
+      sendResponse({ savedPassword: false });
+    }).catch(() => sendResponse({ error: 'storage' }));
+    return true;
+  }
   if (msg.type === 'getReauthDiagnostics') {
     if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) return false;
     getReauthDiagnostics().then(sendResponse).catch(() => sendResponse({ error: 'diagnostics-unavailable' }));
@@ -1340,21 +1395,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   if (msg.type === 'startCustomReauth') {
-    if (typeof msg.username !== 'string' || typeof msg.password !== 'string'
-        || !msg.username.trim() || !msg.password
-        || msg.username.length > 256 || msg.password.length > 1024) {
+    if (!isExtensionPageSender(sender)) return false;
+    const password = typeof msg.password === 'string' ? msg.password : '';
+    const useSavedPassword = msg.useSavedPassword === true;
+    if (typeof msg.username !== 'string' || !msg.username.trim()
+        || msg.username.length > 256 || password.length > 1024
+        || (!password && !useSavedPassword)) {
       msg.username = '';
       msg.password = '';
       sendResponse({ phase: 'failed', error: 'credentials', detail: 'Enter a UCSD username and password.' });
       return false;
     }
     let username = msg.username.trim();
-    let password = msg.password;
+    let submittedPassword = password;
+    const savePassword = msg.savePassword === true;
     msg.username = '';
     msg.password = '';
-    const flow = startCustomReauth(username, password);
+    const flow = startCustomReauth(username, submittedPassword, { savePassword, useSavedPassword });
     username = '';
-    password = '';
+    submittedPassword = '';
     flow.then(sendResponse).catch(async () => {
       await failCustomReauth('injection-failed').catch(() => undefined);
       sendResponse({ phase: 'failed', strategy: 'custom', detail: 'Could not start the custom UCSD sign-in flow.' });
