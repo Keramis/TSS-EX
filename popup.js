@@ -14,6 +14,8 @@ let observedRefreshId = null;
 let refreshStopRequested = false;
 const singleClassRefreshes = new Map();
 let singleRefreshQueue = Promise.resolve();
+let personalRefreshPromise = null;
+let scheduleSyncActive = false;
 
 function sendRuntimeMessage(message, timeoutMs = 20000) {
   let timeoutId;
@@ -28,6 +30,66 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[char]);
+}
+
+function profileNameParts(personalDetails) {
+  const rawName = String(personalDetails?.name || '').trim();
+  const match = rawName.match(/\s*\(([^()]*(?:\/)[^()]*)\)\s*$/);
+  return {
+    displayName: (match ? rawName.slice(0, match.index) : rawName).trim() || 'My profile',
+    pronouns: match ? match[1].trim() : '',
+  };
+}
+
+function renderPersonalProfile(personalDetails) {
+  const button = document.getElementById('profile-toggle');
+  const name = document.getElementById('profile-name');
+  const body = document.getElementById('profile-details');
+  if (!button || !name || !body) return;
+  const parts = profileNameParts(personalDetails);
+  name.textContent = parts.displayName;
+  button.title = parts.displayName === 'My profile' ? 'Student profile' : `Student profile for ${parts.displayName}`;
+  if (!personalDetails) {
+    body.innerHTML = '<p class="profile-empty">Sign in to TSS to load your personal information.</p>';
+    return;
+  }
+  const address = personalDetails.address || {};
+  const addressLines = [address.careOf ? `c/o ${address.careOf}` : '', address.line1, address.line2, address.country].filter(Boolean);
+  const validTo = /9999\s*$/.test(personalDetails.validTo || '') ? 'No expiry' : personalDetails.validTo;
+  const rows = [
+    ['Pronouns', parts.pronouns || 'Not provided'],
+    ['TSN', personalDetails.studentNumber],
+    ['Email', personalDetails.email],
+    ['Address', addressLines.length ? addressLines.join('<br>') : 'Not provided'],
+    ['Valid from', personalDetails.validFrom],
+    ['Valid to', validTo],
+  ].filter(([, value]) => Boolean(value));
+  body.innerHTML = rows.map(([label, value]) => `
+    <div class="profile-detail-row">
+      <span>${escapeHtml(label)}</span>
+      <strong>${label === 'Address' ? addressLines.map(escapeHtml).join('<br>') : escapeHtml(value)}</strong>
+    </div>`).join('');
+}
+
+async function refreshPersonalDetails(force = false) {
+  if (personalRefreshPromise) return personalRefreshPromise;
+  personalRefreshPromise = (async () => {
+    const { personalDetails } = await chrome.storage.local.get('personalDetails');
+    renderPersonalProfile(personalDetails || null);
+    if (!force && personalDetails?.fetchedAt && Date.now() - personalDetails.fetchedAt < 30 * 60 * 1000) return personalDetails;
+    let response;
+    try {
+      response = await sendRuntimeMessage({ type: 'getPersonalDetails' });
+    } catch {
+      return personalDetails || null;
+    }
+    if (!response?.personalDetails) return personalDetails || null;
+    const next = { ...response.personalDetails, fetchedAt: Date.now() };
+    await chrome.storage.local.set({ personalDetails: next });
+    renderPersonalProfile(next);
+    return next;
+  })().finally(() => { personalRefreshPromise = null; });
+  return personalRefreshPromise;
 }
 
 // ---------- Storage helpers ----------
@@ -320,7 +382,7 @@ function renderCalendar() {
       const isConflict = conflictBlockKeys.has(key);
       const lane = laneByBlock.get(b) || { lane: 0, laneCount: 1 };
       const block = document.createElement('div');
-      block.className = `block ${meetingTypeClass(b.type || 'LE')}${isConflict ? ' conflict' : ''}${lane.laneCount > 1 ? ' overlap-lane' : ''}`;
+      block.className = `block ${meetingTypeClass(b.type || 'LE')}${cls.registered ? ' registered' : ' not-booked'}${isConflict ? ' conflict' : ''}${lane.laneCount > 1 ? ' overlap-lane' : ''}`;
       block.style.top = `${top}px`;
       block.style.height = `${height}px`;
       block.style.left = `calc(${lane.lane * 100 / lane.laneCount}% + 2px)`;
@@ -622,7 +684,7 @@ function renderPlannedList() {
   }
   empty.classList.add('hidden');
   const { conflictBlockKeys, finalConflictClassIds } = detectConflicts(planned);
-  for (const cls of planned) {
+  for (const cls of [...planned].sort((a, b) => Number(Boolean(b.registered)) - Number(Boolean(a.registered)))) {
     const hasScheduleConflict = cls.scheduleBlocks.some(
       (b) => !b.isFinal && conflictBlockKeys.has(`${cls.id}|${b.day}|${b.start}|${b.end}`)
     );
@@ -637,7 +699,8 @@ function renderPlannedList() {
       .map((label) => `<span class="schedule-tag">${escapeHtml(label)}</span>`)
       .join('');
 
-    const seatsCls = seatsClass(cls.seatsAvailable, cls.seatsTotal);
+    const hasSeatData = cls.seatsAvailable != null && cls.seatsTotal != null;
+    const seatsCls = hasSeatData ? seatsClass(cls.seatsAvailable, cls.seatsTotal) : 'muted';
     const isRefreshing = singleClassRefreshes.has(cls.id);
     const refreshLabel = `${isRefreshing ? 'Refreshing' : 'Refresh'} ${cls.courseAbbr} class info`;
 
@@ -652,6 +715,7 @@ function renderPlannedList() {
       <div class="planned-card-head">
         <div class="planned-card-title">
           <span class="planned-card-abbr">${escapeHtml(cls.courseAbbr)}</span>
+          ${cls.registered ? '<span class="planned-registered-star" title="Registered in your UCSD schedule" aria-label="Registered in your UCSD schedule">★</span>' : ''}
           <span class="planned-card-name">${escapeHtml(cls.courseTitle)}</span>
         </div>
         <div class="planned-card-actions">
@@ -660,7 +724,7 @@ function renderPlannedList() {
           </button>
           <button class="btn btn-small js-details" data-id="${escapeHtml(cls.id)}">Class details</button>
           <button class="btn btn-small js-requirements" data-id="${escapeHtml(cls.id)}">Requirements</button>
-          <button class="btn btn-small btn-primary js-open" data-id="${escapeHtml(cls.id)}">Open in TSS</button>
+          ${cls.eventPkgObjid ? `<button class="btn btn-small btn-primary js-open" data-id="${escapeHtml(cls.id)}">Open in TSS</button>` : ''}
           <button class="btn-danger-text js-remove" data-id="${escapeHtml(cls.id)}" title="Remove">&times;</button>
         </div>
       </div>
@@ -668,7 +732,7 @@ function renderPlannedList() {
         <div class="planned-schedule">${scheduleTags}</div>
         <div class="planned-info">
           <span class="planned-info-label">Open seats:</span>
-          <span class="${seatsCls}">${escapeHtml(cls.seatsAvailable)}/${escapeHtml(cls.seatsTotal)}</span>
+          <span class="${seatsCls}">${hasSeatData ? `${escapeHtml(cls.seatsAvailable)}/${escapeHtml(cls.seatsTotal)}` : '—'}</span>
         </div>
         <div class="planned-info">
           <span class="planned-info-label">Total waitlist:</span>
@@ -676,11 +740,11 @@ function renderPlannedList() {
         </div>
         <div class="planned-info">
           <span class="planned-info-label">Instructor:</span>
-          <span>${escapeHtml(cls.instructor)}</span>
+          <span>${escapeHtml(cls.instructor || 'Unavailable')}</span>
         </div>
         <div class="planned-info">
           <span class="planned-info-label">Credits:</span>
-          <span>${escapeHtml(cls.credits)}</span>
+          <span>${escapeHtml(cls.credits || '—')}</span>
         </div>
         ${cls.unavailable ? '<div class="conflict-note conflict-schedule">Selected section is no longer listed by TSS</div>' : ''}
         ${conflictNote}
@@ -771,6 +835,62 @@ function meetingDayCode(value) {
   return ({ mon: 'M', tue: 'Tu', wed: 'W', thu: 'Th', fri: 'F', sat: 'Sa', sun: 'Su' })[day] || '';
 }
 
+function parseODataV2Date(value) {
+  const match = String(value || '').match(/\/Date\((-?\d+)\)\//);
+  return match ? Number(match[1]) : null;
+}
+
+function parseIsoDuration(value) {
+  const match = String(value || '').match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  if (!match) return null;
+  return Number(match[1] || 0) * 60 + Number(match[2] || 0);
+}
+
+function minutesToClock(minutes) {
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+function parseEventName(eventName) {
+  const match = String(eventName || '').match(/^([A-Z]+)-(\d+[A-Z]*)-([A-Z]+)\s*\((\d+)-(\d+)\)$/);
+  if (!match) return null;
+  return { courseAbbr: `${match[1]}-${match[2]}`, meetingType: match[3], section: `${match[4]}-${match[5]}` };
+}
+
+function normalizeScheduleEvent(row) {
+  const dateMs = parseODataV2Date(row.EventDate);
+  const startMinutes = parseIsoDuration(row.StartTime);
+  const endMinutes = parseIsoDuration(row.EndTime);
+  const name = parseEventName(row.EventName);
+  const isHoliday = row.EventType === '03' || String(row.ModuleId || '') === '00000000';
+  return {
+    key: `${row.EventId}|${row.EventDate}|${row.StartTime}|${row.EndTime}`,
+    eventId: normalizeEventId(row.EventId),
+    moduleId: String(row.ModuleId || ''),
+    courseName: row.CourseName || '',
+    eventName: row.EventName || '',
+    courseAbbr: name?.courseAbbr || '',
+    meetingType: name?.meetingType || '',
+    section: name?.section || '',
+    teachingMethod: row.TeachingMethod || '',
+    isHoliday,
+    isFinal: !isHoliday && startMinutes != null && endMinutes != null && endMinutes - startMinutes >= 150,
+    dateMs,
+    dateKey: dateMs == null ? '' : bookingDateKey(row.EventDate),
+    dateLabel: dateMs == null ? '' : bookingDate(row.EventDate),
+    day: dateMs == null ? '' : meetingDayCode(new Date(dateMs).toUTCString().slice(0, 3)),
+    startMinutes,
+    endMinutes,
+    start: startMinutes == null ? '' : minutesToClock(startMinutes),
+    end: endMinutes == null ? '' : minutesToClock(endMinutes),
+    room: row.Room || '',
+    location: row.Location || '',
+  };
+}
+
+function parseEventList(rows) {
+  return Array.isArray(rows) ? rows.map(normalizeScheduleEvent) : [];
+}
+
 function enrichBookingRooms(event, sectionRows = []) {
   const eventId = normalizeEventId(event.eventId);
   if (!eventId) return event;
@@ -824,6 +944,10 @@ function normalizeBooking(events, sectionRows = []) {
   }, sectionRows));
 }
 
+function bookingEventsContainRegistration(events) {
+  return (events || []).some((event) => Boolean(event.Booked || event.WaitlistBooking));
+}
+
 function updateStoredClass(id, updater) {
   return chrome.storage.local.get('plannedClasses').then(({ plannedClasses }) => {
     const next = Array.isArray(plannedClasses) ? plannedClasses : [];
@@ -835,6 +959,256 @@ function updateStoredClass(id, updater) {
       return next[index];
     });
   });
+}
+
+function scheduleTermCandidates(baseTerm = currentTerm || DEFAULT_TERM) {
+  const base = baseTerm || DEFAULT_TERM;
+  const academicYear = String(base.academicYear || DEFAULT_TERM.academicYear);
+  const currentPeriod = String(base.academicPeriod || DEFAULT_TERM.academicPeriod);
+  return [...new Set([currentPeriod, '1', '2', '3', '4'])]
+    .map((academicPeriod) => ({ academicYear, academicPeriod }));
+}
+
+function scheduleBlocksForEvents(events) {
+  const blocksByKey = new Map();
+  for (const event of events) {
+    if (!event.start || !event.end || !event.day) continue;
+    const type = event.teachingMethod || event.meetingType || 'LE';
+    const block = {
+      day: event.isFinal ? 'Final' : event.day,
+      ...(event.isFinal ? { finalDate: event.dateKey } : {}),
+      start: event.start,
+      end: event.end,
+      location: event.room || 'Location unavailable',
+      type,
+      ...(event.isFinal ? { isFinal: true } : {}),
+    };
+    const key = `${block.day}|${block.finalDate || ''}|${block.start}|${block.end}|${block.location}|${block.type}`;
+    blocksByKey.set(key, block);
+  }
+  return [...blocksByKey.values()];
+}
+
+function packageEventIds(pkg) {
+  return new Set((pkg?.raw || []).map((row) => normalizeEventId(row.EventID)).filter(Boolean));
+}
+
+function findPackageForEventIds(packages, eventIds, sectionIds = []) {
+  const expected = eventIds instanceof Set ? eventIds : new Set(eventIds || []);
+  const expectedSections = sectionIds instanceof Set ? sectionIds : new Set(sectionIds || []);
+  if (!expected.size) return null;
+  const ranked = packages.map((pkg) => {
+    const ids = packageEventIds(pkg);
+    const matched = [...ids].filter((id) => expected.has(id)).length;
+    const complete = ids.size > 0 && matched === ids.size;
+    const exact = complete && expected.size === ids.size;
+    const sectionMatched = expectedSections.has(String(pkg.displayID || '').trim())
+      || (pkg.raw || []).some((row) => expectedSections.has(String(row.EventPkgDisplayID || '').trim()));
+    return { pkg, matched, complete, exact, sectionMatched };
+  }).filter((item) => item.matched > 0)
+    .sort((a, b) => Number(b.sectionMatched) - Number(a.sectionMatched)
+      || Number(b.exact) - Number(a.exact)
+      || Number(b.complete) - Number(a.complete)
+      || b.matched - a.matched
+      || packageEventIds(a.pkg).size - packageEventIds(b.pkg).size);
+  if (!ranked.length) return null;
+  if (ranked.length > 1 && ranked[0].sectionMatched === ranked[1].sectionMatched
+      && ranked[0].exact === ranked[1].exact
+      && ranked[0].complete === ranked[1].complete && ranked[0].matched === ranked[1].matched
+      && packageEventIds(ranked[0].pkg).size === packageEventIds(ranked[1].pkg).size) return null;
+  return ranked[0].pkg;
+}
+
+function scheduleClassGroups(events) {
+  const groups = new Map();
+  const term = currentTerm || DEFAULT_TERM;
+  for (const event of events) {
+    if (event.isHoliday || !event.moduleId || !event.eventId) continue;
+    const key = event.moduleId;
+    if (!groups.has(key)) groups.set(key, { key, moduleID: event.moduleId, term: { ...term }, events: [] });
+    groups.get(key).events.push(event);
+  }
+  return [...groups.values()];
+}
+
+function registeredClassRecord(group, pkg, existing, now, sectionError = null) {
+  const events = group.events;
+  const sample = events.find((event) => event.courseAbbr) || events[0];
+  const eventIds = [...new Set(events.map((event) => event.eventId).filter(Boolean))];
+  const scheduleBlocks = scheduleBlocksForEvents(events);
+  const courseAbbr = sample.courseAbbr || existing?.courseAbbr || sample.eventName || group.moduleID;
+  const keepsPackage = !pkg || (existing?.selectedPackageOtjid === pkg.otjid && existing?.eventPkgObjid === pkg.objid);
+  const term = pkg ? group.term : {
+    academicYear: existing?.academicYear || group.term.academicYear,
+    academicPeriod: existing?.academicPeriod || group.term.academicPeriod,
+  };
+  return {
+    ...(existing || {}),
+    id: existing?.id || `sync-${group.moduleID}-${term.academicYear}-${term.academicPeriod}-${pkg?.otjid || 'schedule'}`,
+    moduleID: group.moduleID,
+    courseAbbr,
+    courseTitle: sample.courseName || existing?.courseTitle || courseAbbr,
+    credits: existing?.credits || '',
+    academicYear: term.academicYear,
+    academicPeriod: term.academicPeriod,
+    departmentAbbr: existing?.departmentAbbr || courseAbbr.split('-')[0] || '',
+    selectedPackageOtjid: pkg?.otjid || existing?.selectedPackageOtjid || '',
+    eventPkgObjid: pkg?.objid || existing?.eventPkgObjid || '',
+    seatsAvailable: pkg?.seatsAvailable ?? existing?.seatsAvailable ?? null,
+    seatsTotal: pkg?.seatsTotal ?? existing?.seatsTotal ?? null,
+    waitlistTotal: pkg?.waitlistTotal ?? existing?.waitlistTotal ?? null,
+    instructor: pkg?.instructor || existing?.instructor || 'Unavailable',
+    status: pkg?.status || existing?.status || 'Registered',
+    location: pkg?.location || existing?.location || '',
+    scheduleBlocks: scheduleBlocks.length ? scheduleBlocks : pkg?.scheduleBlocks || existing?.scheduleBlocks || [],
+    _lastPkg: pkg || existing?._lastPkg || null,
+    syncedEventIds: eventIds,
+    syncedSections: [...new Set(events.map((event) => event.section).filter(Boolean))],
+    syncedFromSchedule: true,
+    registered: true,
+    registeredFetchedAt: now,
+    sectionFetchedAt: pkg ? now : existing?.sectionFetchedAt || null,
+    sectionError: pkg ? null : sectionError || existing?.sectionError || null,
+    bookingDetails: keepsPackage ? existing?.bookingDetails || null : null,
+    bookingFetchedAt: keepsPackage ? existing?.bookingFetchedAt || null : null,
+    bookingError: keepsPackage ? existing?.bookingError || null : null,
+    availablePackages: pkg ? [] : existing?.availablePackages || [],
+    unavailable: false,
+    addedAt: existing?.addedAt || now,
+    scheduleOnly: !pkg && !existing?.eventPkgObjid,
+  };
+}
+
+async function syncSchedule() {
+  if (scheduleSyncActive) return;
+  if (activeRefreshId || fullRefreshStarting || singleClassRefreshes.size) {
+    showRefreshStatus('Wait for the current class refresh to finish before syncing your schedule.');
+    return;
+  }
+  scheduleSyncActive = true;
+  const button = document.getElementById('sync-schedule');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Syncing…';
+  }
+  const refreshId = `schedule-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  try {
+    const { lastRefreshRun, scheduleSyncRun } = await chrome.storage.local.get(['lastRefreshRun', 'scheduleSyncRun']);
+    const currentRefresh = lastRefreshRun?.startedAt && !lastRefreshRun.finishedAt
+      && Date.now() - lastRefreshRun.startedAt < 30 * 60 * 1000;
+    const currentSync = scheduleSyncRun?.startedAt && !scheduleSyncRun.finishedAt
+      && Date.now() - scheduleSyncRun.startedAt < 30 * 60 * 1000;
+    if (currentRefresh || currentSync) {
+      showRefreshStatus(currentRefresh
+        ? 'A class refresh is already running in another planner tab.'
+        : 'Schedule sync is already running in another planner tab.');
+      return;
+    }
+    await chrome.storage.local.set({ scheduleSyncRun: { refreshId, startedAt: Date.now(), finishedAt: null } });
+    const year = new Date().getFullYear();
+    const from = `${year - 1}-01-01`;
+    const to = `${year + 1}-12-31`;
+    showRefreshStatus('Reading your registered schedule…');
+    const timetableResult = await sendRuntimeMessage({ type: 'getTimetable', from, to, refreshId });
+    if (timetableResult?.error) {
+      if (['no-auth', 'auth-expired'].includes(timetableResult.error)) showAuthBanner('expired');
+      showRefreshStatus(`Could not sync schedule (${timetableResult.error}${timetableResult.status ? ` ${timetableResult.status}` : ''}).`, true);
+      return;
+    }
+
+    const events = parseEventList(timetableResult.events);
+    const groups = scheduleClassGroups(events);
+    const cacheKey = `${from}|${to}`;
+    const storedTimetableRanges = await chrome.storage.local.get('timetableRanges');
+    const timetableRanges = storedTimetableRanges.timetableRanges && typeof storedTimetableRanges.timetableRanges === 'object'
+      ? storedTimetableRanges.timetableRanges
+      : {};
+    await chrome.storage.local.set({ timetableRanges: {
+      ...timetableRanges,
+      [cacheKey]: { from, to, events, fetchedAt: Date.now() },
+    } });
+    const now = Date.now();
+    let authFailed = false;
+    let groupIndex = 0;
+    const syncResults = [];
+    for (const group of groups) {
+      groupIndex++;
+      const sample = group.events.find((event) => event.courseAbbr) || group.events[0];
+      const label = sample.courseAbbr || sample.courseName || group.moduleID;
+      showRefreshStatus(`Syncing registered classes ${groupIndex} of ${groups.length}: ${label}…`);
+      const eventIds = new Set(group.events.map((event) => event.eventId).filter(Boolean));
+      const sectionIds = new Set(group.events.map((event) => event.section).filter(Boolean));
+      let pkg = null;
+      let sectionResult = null;
+      for (const term of scheduleTermCandidates(group.term)) {
+        try {
+          sectionResult = await sendRuntimeMessage({ type: 'getSections', moduleID: group.moduleID, term, refreshId });
+        } catch (error) {
+          sectionResult = { error: error.message || 'network' };
+        }
+        if (['no-auth', 'auth-expired'].includes(sectionResult?.error)) {
+          authFailed = true;
+          break;
+        }
+        if (sectionResult?.error) continue;
+        const packages = groupSections(sectionResult.sections || []);
+        pkg = findPackageForEventIds(packages, eventIds, sectionIds);
+        if (pkg) {
+          group.term = term;
+          break;
+        }
+      }
+      const sectionError = sectionResult?.error
+        ? [sectionResult.error, sectionResult.message].filter(Boolean).join(': ')
+        : pkg ? null : 'No section package matched the registered timetable events';
+      syncResults.push({ group, pkg, sectionError });
+    }
+    const { plannedClasses } = await chrome.storage.local.get('plannedClasses');
+    const next = (Array.isArray(plannedClasses) ? plannedClasses : []).map((cls) => ({ ...cls, registered: false }));
+    for (const result of syncResults) {
+      const { group, pkg, sectionError } = result;
+      const packageIds = packageEventIds(pkg);
+      const moduleMatches = next.filter((cls) => String(cls.moduleID) === group.moduleID);
+      const matching = pkg ? moduleMatches.filter((cls) => String(cls.academicYear) === String(group.term.academicYear)
+        && String(cls.academicPeriod) === String(group.term.academicPeriod)) : moduleMatches;
+      let existing = matching.find((cls) => pkg && cls.selectedPackageOtjid === pkg.otjid);
+      const expectedIds = packageIds.size ? packageIds : new Set(group.events.map((event) => event.eventId).filter(Boolean));
+      if (!existing && expectedIds.size) {
+        existing = matching.find((cls) => [...packageEventIds(cls._lastPkg)].some((id) => expectedIds.has(id))
+          || (cls.syncedEventIds || []).some((id) => expectedIds.has(normalizeEventId(id))));
+      }
+      if (!existing && matching.length === 1) existing = matching[0];
+      const record = registeredClassRecord(group, pkg, existing, now, sectionError);
+      if (existing) {
+        const index = next.findIndex((cls) => cls.id === existing.id);
+        if (index >= 0) next[index] = record;
+      } else {
+        next.push(record);
+      }
+    }
+    await chrome.storage.local.set({ plannedClasses: next });
+    planned = next;
+    renderAll();
+    await chrome.runtime.sendMessage({ type: 'finishRefresh', refreshId }).catch(() => undefined);
+    const registeredCount = groups.length;
+    showRefreshStatus(registeredCount
+      ? `Schedule synced: ${registeredCount} registered ${registeredCount === 1 ? 'class' : 'classes'} marked with a star.`
+      : 'Schedule synced. No registered classes were returned.', false, 100);
+    if (authFailed) showAuthBanner('expired');
+  } catch (error) {
+    showRefreshStatus(`Could not sync schedule: ${error.message || 'unknown error'}`, true);
+  } finally {
+    await chrome.runtime.sendMessage({ type: 'finishRefresh', refreshId }).catch(() => undefined);
+    const { scheduleSyncRun } = await chrome.storage.local.get('scheduleSyncRun').catch(() => ({}));
+    if (scheduleSyncRun?.refreshId === refreshId) {
+      await chrome.storage.local.set({ scheduleSyncRun: { ...scheduleSyncRun, finishedAt: Date.now() } }).catch(() => undefined);
+    }
+    scheduleSyncActive = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Sync schedule';
+    }
+  }
 }
 
 function bookingDetailHtml(cls) {
@@ -869,7 +1243,8 @@ function renderClassDetailsBody(body, classId) {
   const current = planned.find((item) => item.id === classId);
   if (!current) return;
   const schedule = detailScheduleHtml(current.scheduleBlocks || []);
-  body.innerHTML = `<section class="detail-event"><h3>Selected section ${escapeHtml(current.selectedPackageOtjid)}</h3>
+  const selectedSectionLabel = current.selectedPackageOtjid ? `Selected section ${escapeHtml(current.selectedPackageOtjid)}` : 'Registered schedule';
+  body.innerHTML = `<section class="detail-event"><h3>${selectedSectionLabel}</h3>
     <div class="detail-grid"><span>Open seats / capacity</span><strong>${escapeHtml(current.seatsAvailable)}/${escapeHtml(current.seatsTotal)}</strong>
     <span>Total waitlist</span><strong>${escapeHtml(current.waitlistTotal ?? '—')}</strong>
     <span>Professor</span><strong>${escapeHtml(current.instructor || 'Staff')}</strong>
@@ -981,6 +1356,15 @@ function setDetailRefreshProgress(classId, active, percent = 0, message = '') {
 }
 
 async function refreshClassInfo(classId) {
+  if (scheduleSyncActive) {
+    showRefreshStatus('Wait for schedule sync to finish before refreshing a class.');
+    return false;
+  }
+  const { scheduleSyncRun } = await chrome.storage.local.get('scheduleSyncRun');
+  if (scheduleSyncRun?.startedAt && !scheduleSyncRun.finishedAt && Date.now() - scheduleSyncRun.startedAt < 30 * 60 * 1000) {
+    showRefreshStatus('Schedule sync is running in another planner tab.');
+    return false;
+  }
   if (singleClassRefreshes.has(classId)) {
     setDetailRefreshProgress(classId, true, 12, `Refreshing ${planned.find((item) => item.id === classId)?.courseAbbr || 'class'}...`);
     return singleClassRefreshes.get(classId);
@@ -1017,16 +1401,26 @@ async function refreshClassInfo(classId) {
     setClassRefreshButton(classId, true);
     setDetailRefreshProgress(classId, true, 8, `Refreshing ${initialClass.courseAbbr}...`);
     showRefreshStatus(`Refreshing ${initialClass.courseAbbr}...`);
-    const term = termForClass(initialClass);
+    let term = termForClass(initialClass);
     let sectionResult;
     let bookingResult;
-    try {
-      sectionResult = await chrome.runtime.sendMessage({ type: 'getSections', moduleID: initialClass.moduleID, term, refreshId });
-    } catch (error) {
-      sectionResult = { error: error.message || 'network' };
+    let packages = [];
+    let pkg = null;
+    const candidateTerms = initialClass.scheduleOnly ? scheduleTermCandidates(term) : [term];
+    for (const candidateTerm of candidateTerms) {
+      term = candidateTerm;
+      try {
+        sectionResult = await chrome.runtime.sendMessage({ type: 'getSections', moduleID: initialClass.moduleID, term, refreshId });
+      } catch (error) {
+        sectionResult = { error: error.message || 'network' };
+      }
+      if (!sectionResult?.error) {
+        packages = groupSections(sectionResult.sections || []);
+        pkg = packages.find((item) => item.otjid === initialClass.selectedPackageOtjid)
+          || findPackageForEventIds(packages, new Set(initialClass.syncedEventIds || []), new Set(initialClass.syncedSections || []));
+      }
+      if (pkg || !initialClass.scheduleOnly || ['no-auth', 'auth-expired'].includes(sectionResult?.error)) break;
     }
-    const packages = !sectionResult?.error ? groupSections(sectionResult.sections || []) : [];
-    const pkg = packages.find((item) => item.otjid === initialClass.selectedPackageOtjid);
     const sectionRows = pkg?.raw || planned.find((item) => item.id === classId)?._lastPkg?.raw || [];
     setDetailRefreshProgress(classId, true, 48, 'Refreshing booking and meeting details...');
     try {
@@ -1051,6 +1445,9 @@ async function refreshClassInfo(classId) {
         next.unavailable = !pkg;
         next.availablePackages = pkg ? [] : packages.map(({ raw, ...item }) => item);
         if (pkg) Object.assign(next, {
+          academicYear: term.academicYear,
+          academicPeriod: term.academicPeriod,
+          selectedPackageOtjid: pkg.otjid,
           eventPkgObjid: pkg.objid,
           seatsAvailable: pkg.seatsAvailable,
           seatsTotal: pkg.seatsTotal,
@@ -1070,6 +1467,8 @@ async function refreshClassInfo(classId) {
         next.bookingFetchedAt = now;
         next.bookingError = null;
         next.bookingDetails = { events: normalizeBooking(bookingResult.events, sectionRows), fetchedAt: now };
+        next.registered = bookingEventsContainRegistration(bookingResult.events);
+        next.registeredFetchedAt = now;
       } else {
         next.bookingError = [bookingResult?.error, bookingResult?.message].filter(Boolean).join(': ') || 'Booking refresh failed';
         failed = true;
@@ -1102,6 +1501,15 @@ async function refreshClassInfo(classId) {
 }
 
 async function refreshAllClasses() {
+  if (scheduleSyncActive) {
+    showRefreshStatus('Wait for schedule sync to finish before refreshing class info.');
+    return;
+  }
+  const { scheduleSyncRun } = await chrome.storage.local.get('scheduleSyncRun');
+  if (scheduleSyncRun?.startedAt && !scheduleSyncRun.finishedAt && Date.now() - scheduleSyncRun.startedAt < 30 * 60 * 1000) {
+    showRefreshStatus('Schedule sync is running in another planner tab.');
+    return;
+  }
   if (activeRefreshId || fullRefreshStarting) return;
   if (singleClassRefreshes.size) {
     showRefreshStatus('A class refresh is already running. Try again when it finishes.');
@@ -1151,20 +1559,34 @@ async function refreshAllClasses() {
     if (refreshStopRequested) break;
     const cls = classes[index];
     showRefreshStatus(`Refreshing ${index + 1} of ${classes.length}: ${cls.courseAbbr}...`, false, run.completed / run.total * 100);
-    const term = termForClass(cls);
-    const cacheKey = `${cls.moduleID}|${term.academicYear}|${term.academicPeriod}`;
-    if (!sectionCache.has(cacheKey)) {
-      try {
-        sectionCache.set(cacheKey, await chrome.runtime.sendMessage({ type: 'getSections', moduleID: cls.moduleID, term, refreshId }));
-      } catch (error) {
-        sectionCache.set(cacheKey, { error: error.message || 'network' });
+    let term = termForClass(cls);
+    let sectionResult = null;
+    let packages = [];
+    let pkg = null;
+    const candidateTerms = cls.scheduleOnly ? scheduleTermCandidates(term) : [term];
+    for (const candidateTerm of candidateTerms) {
+      term = candidateTerm;
+      const cacheKey = `${cls.moduleID}|${term.academicYear}|${term.academicPeriod}`;
+      if (!sectionCache.has(cacheKey)) {
+        try {
+          sectionCache.set(cacheKey, await chrome.runtime.sendMessage({ type: 'getSections', moduleID: cls.moduleID, term, refreshId }));
+        } catch (error) {
+          sectionCache.set(cacheKey, { error: error.message || 'network' });
+        }
       }
+      sectionResult = sectionCache.get(cacheKey);
+      if (sectionResult?.error === 'cancelled') refreshStopRequested = true;
+      if (refreshStopRequested) break;
+      if (!sectionResult?.error) {
+        packages = groupSections(sectionResult.sections || []);
+        pkg = packages.find((item) => item.otjid === cls.selectedPackageOtjid)
+          || findPackageForEventIds(packages, new Set(cls.syncedEventIds || []), new Set(cls.syncedSections || []));
+      }
+      if (pkg || !cls.scheduleOnly || ['no-auth', 'auth-expired'].includes(sectionResult?.error)) break;
     }
-    const sectionResult = sectionCache.get(cacheKey);
-    if (sectionResult?.error === 'cancelled') refreshStopRequested = true;
     if (refreshStopRequested) break;
     const bookingResult = await chrome.runtime.sendMessage({
-      type: 'getBookingDetails', moduleID: cls.moduleID, eventPkgObjid: cls.eventPkgObjid, term, refreshId,
+      type: 'getBookingDetails', moduleID: cls.moduleID, eventPkgObjid: pkg?.objid || cls.eventPkgObjid, term, refreshId,
     }).catch((error) => ({ error: error.message || 'network' }));
     if (bookingResult?.error === 'cancelled') refreshStopRequested = true;
     if (refreshStopRequested) break;
@@ -1175,14 +1597,13 @@ async function refreshAllClasses() {
       const next = { ...stored };
       let sectionRows = stored._lastPkg?.raw || [];
       if (sectionResult && !sectionResult.error) {
-        const packages = groupSections(sectionResult.sections || []);
-        const pkg = packages.find((item) => item.otjid === stored.selectedPackageOtjid);
         next.sectionFetchedAt = now;
         next.sectionError = null;
-        next.unavailable = !pkg;
+        next.unavailable = !pkg && !stored.scheduleOnly;
         next.availablePackages = pkg ? [] : packages.map(({ raw, ...item }) => item);
         if (pkg) Object.assign(next, {
-          eventPkgObjid: pkg.objid, seatsAvailable: pkg.seatsAvailable, seatsTotal: pkg.seatsTotal,
+          academicYear: term.academicYear, academicPeriod: term.academicPeriod,
+          selectedPackageOtjid: pkg.otjid, eventPkgObjid: pkg.objid, seatsAvailable: pkg.seatsAvailable, seatsTotal: pkg.seatsTotal,
           waitlistTotal: pkg.waitlistTotal, instructor: pkg.instructor, status: pkg.status,
           location: pkg.location, scheduleBlocks: pkg.scheduleBlocks, _lastPkg: pkg,
         });
@@ -1196,6 +1617,8 @@ async function refreshAllClasses() {
         next.bookingFetchedAt = now;
         next.bookingError = null;
         next.bookingDetails = { events: normalizeBooking(bookingResult.events, sectionRows), fetchedAt: now };
+        next.registered = bookingEventsContainRegistration(bookingResult.events);
+        next.registeredFetchedAt = now;
       } else {
         next.bookingError = [bookingResult.error, bookingResult.message].filter(Boolean).join(': ');
         failed = true;
@@ -1651,6 +2074,12 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
       bookingDetails: null,
       bookingFetchedAt: null,
       bookingError: null,
+      registered: false,
+      registeredFetchedAt: null,
+      syncedEventIds: [],
+      syncedSections: [],
+      syncedFromSchedule: false,
+      scheduleOnly: false,
       availablePackages: [],
       unavailable: false,
       addedAt: existing?.addedAt || Date.now(),
@@ -1667,7 +2096,7 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
 }
 
 // ---------- Init ----------
-async function checkAuth() {
+async function checkAuth(forcePersonalRefresh = false) {
   const request = ++authCheckSequence;
   let status;
   try {
@@ -1695,6 +2124,8 @@ async function checkAuth() {
   }
   const capture = document.getElementById('capture-meta');
   if (capture) capture.textContent = `${status?.connected ? 'Connected to TSS' : 'Not connected to TSS'} · Last session capture: ${formatTimestamp(status?.capturedAt)}`;
+  if (status?.connected) refreshPersonalDetails(forcePersonalRefresh).catch(() => undefined);
+  return status;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -1718,7 +2149,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if ((area === 'local' && changes.auth) || (area === 'session' && (changes.reauthFlow || changes.authFault))) checkAuth();
+    if (area === 'local' && changes.auth) {
+      const accountChanged = changes.auth.oldValue?.cookie !== changes.auth.newValue?.cookie;
+      checkAuth(accountChanged);
+    } else if (area === 'session' && (changes.reauthFlow || changes.authFault)) {
+      checkAuth();
+    }
     if (area === 'local' && changes.reauthUseOfficialPopup) {
       renderReauthMode(changes.reauthUseOfficialPopup.newValue === true);
     }
@@ -1862,6 +2298,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   isPlanner = document.body.classList.contains('full-planner');
   planned = await loadPlanned();
   await loadTerm();
+  const { personalDetails } = await chrome.storage.local.get('personalDetails');
+  renderPersonalProfile(personalDetails || null);
   document.getElementById('term-badge').textContent = termBadge(currentTerm);
   const { lastRefreshRun } = await chrome.storage.local.get('lastRefreshRun');
   renderAll();
@@ -1870,6 +2308,28 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const plannerButton = document.getElementById('open-planner');
   if (plannerButton) plannerButton.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('planner.html') }));
+  const profileWrap = document.querySelector('.profile-menu-wrap');
+  const profileToggle = document.getElementById('profile-toggle');
+  const profilePanel = document.getElementById('profile-panel');
+  const closeProfile = () => {
+    if (!profileToggle || !profilePanel) return;
+    profileToggle.setAttribute('aria-expanded', 'false');
+    profilePanel.classList.add('hidden');
+  };
+  if (profileToggle && profilePanel) {
+    profileToggle.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const open = profileToggle.getAttribute('aria-expanded') !== 'true';
+      profileToggle.setAttribute('aria-expanded', String(open));
+      profilePanel.classList.toggle('hidden', !open);
+    });
+    document.addEventListener('click', (event) => {
+      if (!profileWrap?.contains(event.target)) closeProfile();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closeProfile();
+    });
+  }
   const themeToggle = document.getElementById('theme-toggle');
   if (themeToggle) {
     const syncThemeToggle = () => {
@@ -1891,6 +2351,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (isPlanner) refreshAllClasses();
     else chrome.tabs.create({ url: `${chrome.runtime.getURL('planner.html')}?refresh=all` });
   });
+  const syncButton = document.getElementById('sync-schedule');
+  if (syncButton) syncButton.addEventListener('click', syncSchedule);
   const stopButton = document.getElementById('stop-refresh');
   if (stopButton) stopButton.addEventListener('click', stopClassRefresh);
 
@@ -1901,6 +2363,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    if (changes.personalDetails) renderPersonalProfile(changes.personalDetails.newValue || null);
     if (changes.plannedClasses) {
       planned = Array.isArray(changes.plannedClasses.newValue) ? changes.plannedClasses.newValue : [];
       renderAll();

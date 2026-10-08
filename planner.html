@@ -13,10 +13,20 @@
     <header class="topbar">
       <div class="brand">
         <span class="brand-mark">EZ</span>
-        <span class="brand-name">UCSD EZPLAN</span>
+        <div class="profile-menu-wrap">
+          <button id="profile-toggle" class="profile-toggle" type="button" aria-expanded="false" aria-controls="profile-panel" title="Student profile">
+            <span id="profile-name" class="brand-name">My profile</span>
+            <span class="profile-chevron" aria-hidden="true"></span>
+          </button>
+          <div id="profile-panel" class="profile-panel hidden" role="region" aria-label="Personal information">
+            <div class="profile-panel-head">Personal information</div>
+            <div id="profile-details" class="profile-details"><p class="profile-empty">Sign in to TSS to load your personal information.</p></div>
+          </div>
+        </div>
       </div>
       <div id="term-badge" class="term-badge" title="Current term">—</div>
       <button id="open-planner" class="btn btn-small">Full planner</button>
+      <button id="sync-schedule" class="btn btn-small" type="button">Sync schedule</button>
       <div class="topbar-right">
         <button id="reauth-mode-toggle" class="reauth-mode-toggle" type="button" role="switch" aria-checked="false" aria-label="Re-auth method: Intercept" title="Re-auth method: Intercept (I)">I</button>
         <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-checked="true" aria-label="Toggle light mode" title="Toggle light/dark mode">

@@ -71,6 +71,8 @@
   --le-wash: rgba(130,166,206,0.16);
   --di-wash: rgba(147,194,115,0.14);
   --lab-wash: rgba(183,161,222,0.16);
+  --registered-outline: rgba(230,190,91,0.58);
+  --registered-star: #E6BE5B;
   --final-block-bg: rgba(158,179,194,0.16);
   --final-block-border: rgba(86,199,188,0.35);
   --col-wash: rgba(158,179,194,0.05);
@@ -134,6 +136,8 @@ html.light-mode {
   --le-wash: rgba(70,104,138,0.15);
   --di-wash: rgba(78,114,57,0.15);
   --lab-wash: rgba(110,91,142,0.15);
+  --registered-outline: rgba(169,125,25,0.56);
+  --registered-star: #8B6411;
   --final-block-bg: rgba(158,179,194,0.55);
   --final-block-border: rgba(0,99,93,0.4);
   --col-wash: rgba(158,179,194,0.12);
@@ -204,6 +208,66 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   font-size: 14px;
   color: var(--text);
 }
+.profile-menu-wrap { position: relative; }
+.profile-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: min(300px, 36vw);
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.profile-toggle:hover { background: var(--bg-hover); }
+.profile-toggle:focus-visible { outline: 2px solid var(--teal-line); outline-offset: 2px; }
+.profile-toggle .brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-chevron {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 140ms ease;
+}
+.profile-toggle[aria-expanded="true"] .profile-chevron { transform: translateY(2px) rotate(225deg); }
+.profile-panel {
+  position: absolute;
+  top: calc(100% + 9px);
+  left: 0;
+  z-index: 40;
+  width: min(360px, calc(100vw - 28px));
+  max-height: min(70vh, 460px);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--modal-shadow);
+}
+.profile-panel-head {
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--divider);
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.profile-details { padding: 5px 13px 9px; }
+.profile-detail-row {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--divider);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.profile-detail-row:last-child { border-bottom: 0; }
+.profile-detail-row > span { color: var(--muted); }
+.profile-detail-row > strong { min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.profile-empty { padding: 12px 13px; color: var(--muted); font-size: 12px; }
 
 .topbar-right {
   margin-left: auto;
@@ -646,6 +710,11 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
 .block.di { background: var(--di-fill); }
 .block.lab { background: var(--lab-fill); }
 .block.other { background: var(--steel); color: var(--on-steel); }
+.block.not-booked.le { background: color-mix(in srgb, var(--le-fill) 50%, transparent); }
+.block.not-booked.di { background: color-mix(in srgb, var(--di-fill) 50%, transparent); }
+.block.not-booked.lab { background: color-mix(in srgb, var(--lab-fill) 50%, transparent); }
+.block.not-booked.other { background: color-mix(in srgb, var(--steel) 50%, transparent); }
+.block.registered { outline: 1px solid var(--registered-outline); outline-offset: -2px; }
 .block:focus-visible { outline: 2px solid var(--teal-line); outline-offset: 1px; z-index: 5; }
 .block-title {
   font-weight: 600;
@@ -675,6 +744,7 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
   border: 2px solid var(--conflict-border);
   z-index: 3;
 }
+.block.not-booked.conflict { background: color-mix(in srgb, var(--pumpkin) 50%, transparent) !important; }
 .block.conflict::after {
   content: "!";
   position: absolute;
@@ -811,6 +881,13 @@ body.full-planner .final-block-details { font-size: 13px; }
   font-weight: 700;
   color: var(--teal-text);
   font-size: 14px;
+}
+.planned-registered-star {
+  flex: 0 0 auto;
+  color: var(--registered-star);
+  font-size: 15px;
+  line-height: 1;
+  text-shadow: 0 0 5px rgba(230,190,91,0.2);
 }
 .planned-card-name {
   font-size: 12px;

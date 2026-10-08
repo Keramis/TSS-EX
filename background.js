@@ -4,6 +4,8 @@
 const MODULE_BASE =
   'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd/sap/yucsd_con_module_servicedef/0001';
 const BOOKING_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV';
+const PERSONAL_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/BC_OVP_PERSONAL_DETAILS_SRV';
+const TIMETABLE_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/EVENT_TIMETABLE_SRV';
 const AUTH_START_URL = 'https://sis.ucsd.edu/';
 const CUSTOM_AUTH_START_URL = 'https://tss.ucsd.edu/fiori';
 const DUO_HOST = 'api-ce13a1a7.duosecurity.com';
@@ -953,6 +955,138 @@ function getBookingDetails(moduleID, eventPkgObjid, term, refreshId) {
   return request.finally(refreshRequest.finish);
 }
 
+// ----- API: signed-in student profile and timetable -----
+function normalizePersonalDetails(payload) {
+  const rows = payload?.d?.results;
+  if (!Array.isArray(rows) || rows.length !== 1) return null;
+  const row = rows[0];
+  if (!row.StudentNumber || !row.Name) return null;
+  const photoUri = String(row.PhotoUri || '');
+  return {
+    studentNumber: String(row.StudentNumber || ''),
+    name: String(row.Name || ''),
+    email: String(row.UniversityEmail || ''),
+    photoUri: /^https:\/\//i.test(photoUri) ? photoUri : '',
+    validFrom: String(row.Validfromdate || ''),
+    validTo: String(row.Validtodate || ''),
+    address: {
+      careOf: String(row.ItedAddrNameCo || ''),
+      line1: [row.HouseNo, row.Street, row.ItedStreet2].filter(Boolean).join(' '),
+      line2: [row.City, row.PostlCod1].filter(Boolean).join(', '),
+      country: String(row.CountryName || ''),
+    },
+  };
+}
+
+async function fetchPersonalDetails() {
+  const auth = await getAuth();
+  if (!authPresent(auth)) return { error: 'no-auth' };
+  try {
+    const resp = await fetch(`${PERSONAL_BASE}/PersonalDetailsSet?sap-client=500`, {
+      headers: {
+        Accept: 'application/json',
+        'Accept-Language': 'en',
+        ...optionalAuthHeaders(auth),
+        'x-requested-with': 'XMLHttpRequest',
+      },
+      credentials: 'include',
+      redirect: 'manual',
+    });
+    if (isAuthResponse(resp)) return { error: 'auth-expired', status: resp.status };
+    if (!resp.ok) return { error: 'http', status: resp.status };
+    const text = (await resp.text()).replace(/^\uFEFF/, '').trim();
+    let payload;
+    try {
+      payload = parseTssJson(text);
+    } catch (error) {
+      return { error: 'parse', message: `${error.message}; ${resp.headers.get('content-type') || 'unknown content type'}` };
+    }
+    const personalDetails = normalizePersonalDetails(payload);
+    if (!personalDetails) return { error: 'parse', message: 'TSS response did not contain personal details' };
+    return { personalDetails };
+  } catch (error) {
+    return { error: 'network', message: error.message };
+  }
+}
+
+async function fetchTimetable(from, to, refreshRequest) {
+  if (refreshRequest.signal?.aborted) return { error: refreshRequest.result() };
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  if (!datePattern.test(String(from || '')) || !datePattern.test(String(to || '')) || from > to) {
+    return { error: 'invalid-request' };
+  }
+  const auth = await getAuth();
+  if (!authPresent(auth)) return { error: 'no-auth' };
+
+  const filter = `(EventDate ge datetime'${from}T00:00:00' and EventDate le datetime'${to}T23:59:59')`;
+  const firstUrl = `${TIMETABLE_BASE}/EventListSet?sap-client=500&$filter=${encodeURIComponent(filter)}`;
+  const endpointPath = new URL(`${TIMETABLE_BASE}/EventListSet`).pathname;
+  const rows = [];
+  let reportedCount = null;
+  let nextUrl = firstUrl;
+  try {
+    while (nextUrl) {
+      if (refreshRequest.signal?.aborted) return { error: refreshRequest.result() };
+      const resp = await fetch(nextUrl, {
+        headers: {
+          Accept: 'application/json',
+          'Accept-Language': 'en',
+          ...optionalAuthHeaders(auth),
+          'x-requested-with': 'XMLHttpRequest',
+        },
+        credentials: 'include',
+        redirect: 'manual',
+        signal: refreshRequest.signal,
+      });
+      if (isAuthResponse(resp)) return { error: 'auth-expired', status: resp.status };
+      if (!resp.ok) return { error: 'http', status: resp.status };
+      const text = (await resp.text()).replace(/^\uFEFF/, '').trim();
+      let payload;
+      try {
+        payload = parseTssJson(text);
+      } catch (error) {
+        return {
+          error: refreshRequest.signal?.aborted ? refreshRequest.result() : 'parse',
+          message: refreshRequest.signal?.aborted ? undefined : `${error.message}; ${resp.headers.get('content-type') || 'unknown content type'}`,
+        };
+      }
+      if (!Array.isArray(payload?.d?.results)) return { error: 'parse', message: 'TSS response did not contain a timetable list' };
+      if (payload.d.__count != null) {
+        const count = Number(payload.d.__count);
+        if (!Number.isInteger(count) || count < 0 || (reportedCount !== null && reportedCount !== count)) {
+          return { error: 'parse', message: 'TSS returned an invalid timetable count' };
+        }
+        reportedCount = count;
+      }
+      rows.push(...payload.d.results);
+
+      const continuation = payload.d.__next;
+      if (!continuation) {
+        nextUrl = '';
+      } else {
+        const parsed = new URL(continuation, nextUrl);
+        if (parsed.origin !== 'https://tss.ucsd.edu' || parsed.pathname !== endpointPath) {
+          return { error: 'parse', message: 'TSS returned an unexpected timetable continuation URL' };
+        }
+        nextUrl = parsed.href;
+      }
+    }
+    if (reportedCount !== null && reportedCount !== rows.length) {
+      return { error: 'parse', message: 'TSS timetable count did not match the returned rows' };
+    }
+    return { events: rows };
+  } catch (error) {
+    return { error: refreshRequest.signal?.aborted ? refreshRequest.result() : 'network', message: error.message };
+  } finally {
+    refreshRequest.finish();
+  }
+}
+
+function getTimetable(from, to, refreshId) {
+  const refreshRequest = createRefreshRequest(refreshId);
+  return fetchTimetable(from, to, refreshRequest).finally(refreshRequest.finish);
+}
+
 // ----- API: get prerequisites -----
 function formatDate(d) {
   const yyyy = d.getFullYear();
@@ -1165,6 +1299,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'getBookingDetails') {
     trackApiResult(msg.type, getBookingDetails(msg.moduleID, msg.eventPkgObjid, msg.term, msg.refreshId)).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'getPersonalDetails') {
+    trackApiResult(msg.type, fetchPersonalDetails()).then(sendResponse).catch(() => sendResponse({ error: 'background' }));
+    return true;
+  }
+  if (msg.type === 'getTimetable') {
+    trackApiResult(msg.type, getTimetable(msg.from, msg.to, msg.refreshId)).then(sendResponse).catch(() => sendResponse({ error: 'background' }));
     return true;
   }
   if (msg.type === 'cancelRefresh') {
