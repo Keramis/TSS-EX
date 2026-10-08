@@ -1112,7 +1112,7 @@ async function syncSchedule() {
     const timetableResult = await sendRuntimeMessage({ type: 'getTimetable', from, to, refreshId });
     if (timetableResult?.error) {
       if (['no-auth', 'auth-expired'].includes(timetableResult.error)) showAuthBanner('expired');
-      showRefreshStatus(`Could not sync schedule (${timetableResult.error}${timetableResult.status ? ` ${timetableResult.status}` : ''}).`, true);
+      showRefreshStatus(`Could not sync schedule (${timetableResult.error}${timetableResult.status ? ` ${timetableResult.status}` : ''}).`, true, null, true);
       return;
     }
 
@@ -1193,10 +1193,10 @@ async function syncSchedule() {
     const registeredCount = groups.length;
     showRefreshStatus(registeredCount
       ? `Schedule synced: ${registeredCount} registered ${registeredCount === 1 ? 'class' : 'classes'} marked with a star.`
-      : 'Schedule synced. No registered classes were returned.', false, 100);
+      : 'Schedule synced. No registered classes were returned.', false, 100, true);
     if (authFailed) showAuthBanner('expired');
   } catch (error) {
-    showRefreshStatus(`Could not sync schedule: ${error.message || 'unknown error'}`, true);
+    showRefreshStatus(`Could not sync schedule: ${error.message || 'unknown error'}`, true, null, true);
   } finally {
     await chrome.runtime.sendMessage({ type: 'finishRefresh', refreshId }).catch(() => undefined);
     const { scheduleSyncRun } = await chrome.storage.local.get('scheduleSyncRun').catch(() => ({}));
@@ -1306,9 +1306,15 @@ function refreshMetaLabel(run) {
   return `Last refresh: ${formatTimestamp(run.startedAt)} (${Math.max(0, run.total - run.errors)}/${run.total} complete)`;
 }
 
-function showRefreshStatus(message, error = false, progressValue = null) {
+let refreshStatusFadeTimer = null;
+let refreshStatusHideTimer = null;
+
+function showRefreshStatus(message, error = false, progressValue = null, autoDismiss = false) {
   const status = document.getElementById('refresh-status');
   if (!status) return;
+  clearTimeout(refreshStatusFadeTimer);
+  clearTimeout(refreshStatusHideTimer);
+  status.classList.remove('is-fading');
   const statusText = document.getElementById('refresh-status-text');
   if (statusText) statusText.textContent = message;
   status.classList.toggle('hidden', !message);
@@ -1330,6 +1336,15 @@ function showRefreshStatus(message, error = false, progressValue = null) {
     }
     progress.setAttribute('aria-valuenow', String(bounded));
     fill.style.width = `${bounded}%`;
+  }
+  if (message && autoDismiss) {
+    refreshStatusFadeTimer = setTimeout(() => {
+      status.classList.add('is-fading');
+      refreshStatusHideTimer = setTimeout(() => {
+        status.classList.add('hidden');
+        status.classList.remove('is-fading');
+      }, 1000);
+    }, 3000);
   }
 }
 
@@ -1483,10 +1498,10 @@ async function refreshClassInfo(classId) {
       if (body) renderClassDetailsBody(body, classId);
     }
     setDetailRefreshProgress(classId, true, 100, failed ? 'Refresh finished with errors.' : 'Class info refreshed.');
-    showRefreshStatus(failed ? `Refresh finished with errors for ${initialClass.courseAbbr}.` : `Refreshed ${initialClass.courseAbbr}.`, failed);
+    showRefreshStatus(failed ? `Refresh finished with errors for ${initialClass.courseAbbr}.` : `Refreshed ${initialClass.courseAbbr}.`, failed, null, true);
     return !failed && Boolean(updatedClass);
   }).catch((error) => {
-    showRefreshStatus(`Could not refresh class info: ${error.message || 'unknown error'}`, true);
+    showRefreshStatus(`Could not refresh class info: ${error.message || 'unknown error'}`, true, null, true);
     return false;
   }).finally(() => {
     singleClassRefreshes.delete(classId);
@@ -1641,7 +1656,7 @@ async function refreshAllClasses() {
   showRefreshStatus(refreshStopRequested
     ? `Refresh stopped. ${run.completed} of ${run.total} classes completed.`
     : `Refresh complete: ${run.completed - run.errors}/${run.total} classes fully refreshed; ${run.errors} need attention.`, false,
-  run.total ? run.completed / run.total * 100 : 100);
+    run.total ? run.completed / run.total * 100 : 100, true);
 }
 
 function stopClassRefresh() {
@@ -2388,7 +2403,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           const stopButton = document.getElementById('stop-refresh');
           if (refreshButton) refreshButton.disabled = false;
           if (stopButton) stopButton.classList.add('hidden');
-          showRefreshStatus(run.cancelled ? 'Refresh stopped in the other planner tab.' : 'Refresh finished in the other planner tab.', false, progress);
+          showRefreshStatus(run.cancelled ? 'Refresh stopped in the other planner tab.' : 'Refresh finished in the other planner tab.', false, progress, true);
           if (selectedDetailId) setDetailRefreshProgress(selectedDetailId, false);
         } else {
           showRefreshStatus(`Refreshing classes in the other planner tab: ${run.completed || 0}/${run.total}`, false, progress);

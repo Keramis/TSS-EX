@@ -781,6 +781,7 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
   border-radius: 4px;
   display: flex;
   align-items: center;
+  transition: color 1s ease, background-color 1s ease;
 }
 .refresh-status.danger:not(.has-progress) { color: var(--danger); background: var(--danger-bg); }
 .refresh-status #refresh-status-text {
@@ -790,7 +791,7 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
   font-weight: 600;
   line-height: 1.15;
   color: var(--text);
-  transition: color 400ms ease;
+  transition: color 1s ease, opacity 1s ease;
 }
 .refresh-status.has-progress #refresh-status-text {
   color: #fff;
@@ -804,11 +805,16 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
   background: var(--bg-strong);
   transition: background-color 400ms ease;
 }
-.refresh-progress > span { display: block; width: 0; height: 100%; background: #2f6fed; transition: width 400ms ease, background-color 400ms ease; }
+.refresh-progress > span { display: block; width: 0; height: 100%; background: #2f6fed; transition: width 400ms ease, background-color 1s ease; }
 .refresh-progress.hidden { display: none; }
 .refresh-status.state-progressing .refresh-progress > span { background: #2f6fed; }
 .refresh-status.state-complete .refresh-progress > span { background: #1f9d55; }
 .refresh-status.state-error .refresh-progress > span { background: #d64545; }
+.refresh-status.is-fading,
+.refresh-status.danger.is-fading { color: var(--muted); background: transparent; }
+.refresh-status.is-fading #refresh-status-text,
+.refresh-status.has-progress.is-fading #refresh-status-text { color: var(--muted); opacity: 0; text-shadow: none; }
+.refresh-status.is-fading .refresh-progress { opacity: 0; transition: opacity 1s ease; }
 .detail-refresh-indicator { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; color: var(--muted); font-size: 11px; }
 .detail-refresh-track { flex: 1; height: 4px; overflow: hidden; border-radius: 4px; background: var(--bg-strong); }
 .detail-refresh-track span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--teal-text); transition: width 220ms ease; }
