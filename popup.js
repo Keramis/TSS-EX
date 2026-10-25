@@ -2223,6 +2223,35 @@ document.addEventListener('DOMContentLoaded', async () => {
   const reauthFormError = document.getElementById('reauth-form-error');
   const reauthSubmit = reauthForm.querySelector('button[type="submit"]');
   const clearSavedPasswordButton = document.getElementById('clear-saved-password-btn');
+  const logoutDialog = document.getElementById('logout-dialog');
+  const logoutConfirmButton = document.getElementById('logout-confirm');
+  const logoutDialogError = document.getElementById('logout-dialog-error');
+
+  document.getElementById('logout-btn').addEventListener('click', () => {
+    logoutDialogError.textContent = '';
+    logoutDialogError.classList.add('hidden');
+    logoutConfirmButton.disabled = false;
+    logoutConfirmButton.textContent = 'Logout';
+    logoutDialog.showModal();
+  });
+  logoutDialog.addEventListener('click', (event) => {
+    if (event.target !== logoutConfirmButton) logoutDialog.close();
+  });
+  logoutConfirmButton.addEventListener('click', async () => {
+    if (logoutConfirmButton.disabled) return;
+    logoutConfirmButton.disabled = true;
+    logoutConfirmButton.textContent = 'Logging out…';
+    try {
+      const result = await sendRuntimeMessage({ type: 'logoutTss' });
+      if (!result?.started) throw new Error(result?.error || 'logout-failed');
+      logoutDialog.close();
+    } catch {
+      logoutDialogError.textContent = 'Could not start UCSD logout. Try again.';
+      logoutDialogError.classList.remove('hidden');
+      logoutConfirmButton.disabled = false;
+      logoutConfirmButton.textContent = 'Logout';
+    }
+  });
 
   const refreshSavedReauthSettings = async () => {
     const [{ reauthUsername: savedUsername }, credentialState] = await Promise.all([

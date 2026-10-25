@@ -32,6 +32,7 @@
         <button id="theme-toggle" class="theme-toggle" type="button" role="switch" aria-checked="true" aria-label="Toggle light mode" title="Toggle light/dark mode">
           <span class="theme-toggle-knob"></span>
         </button>
+        <button id="logout-btn" class="logout-icon-btn" type="button" aria-label="Log out of UCSD" title="Log out of UCSD">⛔</button>
       </div>
     </header>
 
@@ -136,6 +137,15 @@
     </section>
 
   </div>
+  <dialog id="logout-dialog" class="logout-dialog" aria-labelledby="logout-dialog-title">
+    <h2 id="logout-dialog-title">Log out of UCSD?</h2>
+    <p>This will end your UCSD TSS session. Are you sure?</p>
+    <div id="logout-dialog-error" class="reauth-form-error hidden" role="alert"></div>
+    <div class="logout-dialog-actions">
+      <button id="logout-cancel" class="btn btn-small" type="button">No</button>
+      <button id="logout-confirm" class="btn btn-small btn-danger" type="button">Logout</button>
+    </div>
+  </dialog>
   <dialog id="reauth-dialog" class="reauth-dialog" aria-labelledby="reauth-dialog-title">
     <form id="reauth-form">
       <h2 id="reauth-dialog-title">Sign in to UCSD</h2>

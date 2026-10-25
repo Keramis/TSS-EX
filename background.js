@@ -8,9 +8,11 @@ const PERSONAL_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/BC_OVP_PERSONAL_D
 const TIMETABLE_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/EVENT_TIMETABLE_SRV';
 const AUTH_START_URL = 'https://sis.ucsd.edu/';
 const CUSTOM_AUTH_START_URL = 'https://tss.ucsd.edu/fiori';
+const TSS_LOGOUT_URL = 'https://tss.ucsd.edu/sap/public/bc/icf/logoff?sap-client=500';
 const DUO_HOST = 'api-ce13a1a7.duosecurity.com';
 const CUSTOM_CREDENTIALS_KEY = 'customReauthCredentials';
 const SAVED_CUSTOM_PASSWORD_KEY = 'savedCustomReauthPassword';
+const TSS_LOGOUT_PENDING_KEY = 'tssLogoutPending';
 const CUSTOM_REAUTH_TIMEOUT_ALARM = 'customReauthTimeout';
 const CUSTOM_REAUTH_ERROR_DETAILS = {
   'proxy-choice-not-found': 'Could not select UCSD SSO on the TSS sign-in page.',
@@ -59,6 +61,8 @@ const cancelledRefreshIds = new Set();
 
 function captureAuthHeaders(headers) {
   authCaptureQueue = authCaptureQueue.then(async () => {
+    const { [TSS_LOGOUT_PENDING_KEY]: logoutPending } = await chrome.storage.session.get(TSS_LOGOUT_PENDING_KEY);
+    if (logoutPending) return;
     const { auth: previous } = await chrome.storage.local.get('auth');
     const now = Date.now();
     const cookieChanged = Boolean(headers.cookie && headers.cookie !== previous?.cookie);
@@ -454,6 +458,35 @@ async function startReauth() {
   }
 }
 
+async function performTssLogout() {
+  let tab = null;
+  await chrome.storage.session.set({ [TSS_LOGOUT_PENDING_KEY]: true });
+  try {
+    const previousFlow = await getReauthFlow();
+    await setReauthFlow({ phase: 'logging-out', strategy: 'logout' });
+    await clearCustomCredentials();
+    await closeReauthTarget(previousFlow);
+
+    tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+    if (!Number.isInteger(tab?.id)) throw new Error('Could not create the UCSD logout tab');
+    await chrome.tabs.update(tab.id, { url: TSS_LOGOUT_URL });
+    await authCaptureQueue;
+    await chrome.storage.local.remove('auth');
+    await chrome.storage.session.remove([TSS_SESSION_CACHE_KEY, 'authFault', 'reauthFlow']);
+    return tab;
+  } catch (error) {
+    if (Number.isInteger(tab?.id)) await chrome.tabs.remove(tab.id).catch(() => undefined);
+    await chrome.storage.session.remove(TSS_LOGOUT_PENDING_KEY).catch(() => undefined);
+    await chrome.storage.session.set({
+      reauthFlow: {
+        phase: 'failed', strategy: 'logout', error: 'logout',
+        detail: 'Could not open the UCSD logout page. Try again.',
+      },
+    }).catch(() => undefined);
+    throw error;
+  }
+}
+
 async function startCustomReauth(username, password, { savePassword = false, useSavedPassword = false } = {}) {
   if (customReauthStartPromise) return customReauthStartPromise;
   customReauthStartPromise = (async () => {
@@ -624,6 +657,7 @@ async function finishReauth(tabId, finalDocument = false) {
   }
   if (!['automating', 'pending'].includes(flow.phase)) return;
   await setReauthFlow({ ...flow, phase: 'verifying' });
+  await chrome.storage.session.remove(TSS_LOGOUT_PENDING_KEY).catch(() => undefined);
   await authCaptureQueue;
   const verification = await verifyTssSession(true);
   const current = await getReauthFlow();
@@ -1337,10 +1371,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'tssFioriReady') {
     const tabId = sender.tab?.id;
     if (tabId && sender.url?.startsWith('https://tss.ucsd.edu/fiori')) {
+      chrome.storage.session.remove(TSS_LOGOUT_PENDING_KEY).catch(() => undefined);
       finishReauth(tabId, true).catch(() => undefined);
     }
     sendResponse({ received: true });
     return false;
+  }
+  if (msg.type === 'logoutTss') {
+    if (!isExtensionPageSender(sender)) return false;
+    performTssLogout().then((tab) => {
+      sendResponse({ started: true });
+      chrome.tabs.update(tab.id, { active: true }).catch(() => undefined);
+    }).catch(() => sendResponse({ error: 'logout-failed' }));
+    return true;
   }
   if (msg.type === 'searchClasses') {
     trackApiResult(msg.type, searchClasses(msg.term, msg.query))

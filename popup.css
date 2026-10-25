@@ -45,6 +45,8 @@
   --teal-wash: rgba(0,99,93,0.32);
   --danger: #F5924E;
   --danger-bg: rgba(238,123,48,0.16);
+  --logout-bg: #C62828;
+  --logout-bg-hover: #A61B1B;
   --warn-wash-weak: rgba(238,123,48,0.10);
   --warn-wash: rgba(238,123,48,0.16);
   --warn-wash-strong: rgba(238,123,48,0.24);
@@ -110,6 +112,8 @@ html.light-mode {
   --teal-wash: rgba(0,99,93,0.10);
   --danger: #C0551A;
   --danger-bg: rgba(238,123,48,0.14);
+  --logout-bg: #B71C1C;
+  --logout-bg-hover: #921818;
   --warn-wash-weak: rgba(238,123,48,0.08);
   --warn-wash: rgba(238,123,48,0.14);
   --warn-wash-strong: rgba(238,123,48,0.28);
@@ -334,6 +338,24 @@ html.light-mode .theme-toggle-knob {
 }
 html.light-mode .theme-toggle-knob::before { content: "☀"; }
 .theme-toggle:focus-visible { outline: 2px solid var(--teal-line); outline-offset: 2px; }
+.logout-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.logout-icon-btn:hover { background: var(--bg-hover); }
+.logout-icon-btn:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; }
 
 .term-badge {
   flex-shrink: 0;
@@ -450,8 +472,14 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
   font: 11px monospace; resize: vertical;
 }
 .reauth-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
   width: min(420px, calc(100vw - 32px));
   max-width: calc(100vw - 32px);
+  height: fit-content;
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
   padding: 22px;
   color: var(--text);
   background: var(--surface);
@@ -462,6 +490,32 @@ html.light-mode .theme-toggle-knob::before { content: "☀"; }
 .reauth-dialog::backdrop { background: var(--backdrop); }
 .reauth-dialog h2 { margin-bottom: 8px; font-size: 18px; }
 .reauth-dialog p { margin-bottom: 16px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.logout-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(360px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  height: fit-content;
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 22px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--modal-shadow);
+}
+.logout-dialog::backdrop { background: var(--backdrop); }
+.logout-dialog h2 { margin-bottom: 8px; font-size: 18px; }
+.logout-dialog p { margin-bottom: 16px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.logout-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.btn-danger {
+  background: var(--logout-bg);
+  border-color: var(--logout-bg);
+  color: #fff;
+}
+.btn-danger:hover { background: var(--logout-bg-hover); border-color: var(--logout-bg-hover); }
 .reauth-field { display: block; margin-top: 12px; color: var(--text); font-size: 13px; }
 .reauth-field input {
   display: block;
