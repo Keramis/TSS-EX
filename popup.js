@@ -21,6 +21,14 @@ let scheduleSyncActive = false;
 let searchOperationActive = false;
 let searchExportFadeTimer = null;
 let searchExportHideTimer = null;
+const TEA_PAGE_SIZE = 20;
+let teaRequests = [];
+let teaRequestCount = 0;
+let teaNextSkip = null;
+let teaRequestsLoaded = false;
+let teaRequestsLoading = false;
+let teaRequestLoadSequence = 0;
+let teaDetailSequence = 0;
 
 function sendRuntimeMessage(message, timeoutMs = 20000) {
   let timeoutId;
@@ -35,6 +43,244 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[char]);
+}
+
+function formatTeaDate(value) {
+  if (!value) return 'Unavailable';
+  const sapDate = String(value).match(/^\\?\/Date\((-?\d+)(?:[+-]\d+)?\)\\?\/$/);
+  const date = sapDate ? new Date(Number(sapDate[1])) : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function teaErrorMessage(result) {
+  if (result?.error === 'no-auth') return 'Sign in to TSS to view your TEA requests.';
+  if (result?.error === 'auth-expired') return 'Your TSS session expired. Re-authenticate, then refresh your requests.';
+  if (result?.error === 'http') return `TSS could not load TEA requests (HTTP ${result.status || 'error'}). Try again.`;
+  if (result?.error === 'parse') return 'TSS returned request data in an unexpected format. Try again later.';
+  if (result?.error === 'invalid-request') return 'The request could not be opened because its identifier was invalid.';
+  return 'Could not connect to TSS. Check your connection and try again.';
+}
+
+function renderTeaRequests() {
+  const list = document.getElementById('tea-request-list');
+  const loadMore = document.getElementById('tea-load-more');
+  if (!list || !loadMore) return;
+  list.innerHTML = teaRequests.map((request) => {
+    const id = String(request.RequestID || '');
+    const course = request.CourseCode || 'Course unavailable';
+    const type = request.RequestTypeText || request.RequestType || 'Request';
+    const term = [request.AcademicSessionText, request.AcademicYearText].filter(Boolean).join(' · ');
+    const meta = [type, term, formatTeaDate(request.RequestDateTime)].filter(Boolean);
+    return `<li><button class="tea-request-card" type="button" data-request-id="${escapeHtml(id)}">
+      <span class="tea-request-main"><span class="tea-request-course">${escapeHtml(course)}</span>
+      <span class="tea-request-title">${escapeHtml(request.CourseTitle || '')}</span>
+      <span class="tea-request-meta">${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</span></span>
+      <span class="tea-request-state">${escapeHtml(request.StatusText || request.Status || 'Status unavailable')}</span>
+    </button></li>`;
+  }).join('');
+  loadMore.classList.toggle('hidden', teaNextSkip === null);
+  loadMore.disabled = teaRequestsLoading;
+}
+
+async function loadTeaRequests({ reset = false } = {}) {
+  const status = document.getElementById('tea-status');
+  const refresh = document.getElementById('tea-refresh');
+  const loadMore = document.getElementById('tea-load-more');
+  if (!status || teaRequestsLoading) return;
+  teaRequestsLoading = true;
+  const sequence = ++teaRequestLoadSequence;
+  const skip = reset ? 0 : teaNextSkip;
+  if (skip === null) {
+    teaRequestsLoading = false;
+    return;
+  }
+  if (reset) {
+    if (!teaRequestsLoaded) status.textContent = 'Loading TEA requests…';
+  } else {
+    status.textContent = 'Loading more requests…';
+  }
+  if (refresh) refresh.disabled = true;
+  if (loadMore) loadMore.disabled = true;
+  try {
+    const result = await sendRuntimeMessage({ type: 'getTeaRequests', skip, top: TEA_PAGE_SIZE });
+    if (sequence !== teaRequestLoadSequence) return;
+    if (result?.error) {
+      status.textContent = teaErrorMessage(result);
+      return;
+    }
+    const rows = Array.isArray(result?.requests) ? result.requests : [];
+    teaRequests = reset ? rows : [...teaRequests, ...rows];
+    teaRequestCount = Number.isInteger(result?.count) ? result.count : teaRequests.length;
+    teaNextSkip = Number.isInteger(result?.nextSkip) ? result.nextSkip : null;
+    teaRequestsLoaded = true;
+    status.textContent = teaRequestCount
+      ? `${teaRequestCount} request${teaRequestCount === 1 ? '' : 's'} found.`
+      : 'No TEA requests found.';
+    renderTeaRequests();
+  } catch (error) {
+    if (sequence === teaRequestLoadSequence) status.textContent = teaErrorMessage({ error: 'network' });
+  } finally {
+    if (sequence === teaRequestLoadSequence) {
+      teaRequestsLoading = false;
+      if (refresh) refresh.disabled = false;
+      if (loadMore) loadMore.disabled = false;
+    }
+  }
+}
+
+function teaDetailSection(title, content) {
+  return content ? `<section class="tea-detail-section"><h3>${escapeHtml(title)}</h3>${content}</section>` : '';
+}
+
+function teaDetailGrid(fields) {
+  const rows = fields.filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '');
+  if (!rows.length) return '';
+  return `<div class="tea-detail-grid">${rows.map(([label, value]) => `<span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>`).join('')}</div>`;
+}
+
+function teaListSection(title, rows, renderRow) {
+  if (!rows.length) return '';
+  return teaDetailSection(title, `<ul class="tea-detail-list">${rows.map(renderRow).join('')}</ul>`);
+}
+
+function renderTeaRequestDetails(details) {
+  const request = details.request || {};
+  const overview = teaDetailGrid([
+    ['Request ID', request.RequestID],
+    ['Request type', request.RequestTypeText || request.RequestType],
+    ['Status', request.StatusText || request.Status],
+    ['Status reason', request.ReasonText || request.StatusReason],
+    ['Course', [request.CourseCode, request.CourseTitle].filter(Boolean).join(' · ')],
+    ['Term', [request.AcademicSessionText, request.AcademicYearText].filter(Boolean).join(' · ')],
+    ['Submitted', formatTeaDate(request.RequestDateTime)],
+    ['Department', request.DepartmentText],
+    ['Credits', [request.Credits, request.UnitType].filter(Boolean).join(' ')],
+    ['Unit limit', request.UnitLimit === true ? 'Yes' : request.UnitLimit === false ? 'No' : ''],
+  ]);
+  const packages = Array.isArray(details.eventPackages) ? details.eventPackages : [];
+  const allowed = Array.isArray(details.allowedSections) ? details.allowedSections : [];
+  const history = Array.isArray(details.history) ? details.history : [];
+  const attachments = Array.isArray(details.attachments) ? details.attachments : [];
+  const historySection = teaListSection('Status history and comments', history, (item) => {
+    const transition = [item.oldStatusText || item.oldStatus, item.newStatusText || item.newStatus].filter(Boolean).join(' → ');
+    const date = item.dateTimeStamp ? formatTeaDate(item.dateTimeStamp) : '';
+    const heading = [date, transition].filter(Boolean).join(' · ') || 'Request update';
+    const comment = item.commentText || item.reasonText || '';
+    const author = item.postedByName || item.AddedByName || '';
+    return `<li><strong>${escapeHtml(heading)}</strong>${comment ? `<span>${escapeHtml(comment)}</span>` : ''}${author ? `<span>${escapeHtml(author)}</span>` : ''}</li>`;
+  });
+  const attachmentSection = teaListSection('Attachments', attachments, (item) => {
+    const name = item.FileName || [item.FileExt, item.DocId].filter(Boolean).join(' ') || 'Attachment';
+    const meta = [item.MimeType, item.AddedOn ? formatTeaDate(item.AddedOn) : ''].filter(Boolean).join(' · ');
+    return `<li><strong>${escapeHtml(name)}</strong>${meta ? `<span>${escapeHtml(meta)}</span>` : ''}</li>`;
+  });
+  const body = [
+    teaDetailSection('Request overview', overview),
+    teaDetailSection('Justification', request.Justification ? `<p class="tea-justification">${escapeHtml(request.Justification)}</p>` : '<p class="tea-detail-empty">No justification provided.</p>'),
+    teaListSection('Requested course or sections', packages, (item, index) => {
+      const title = [item.EventPkgAbbr, item.EventPkgText].filter(Boolean).join(' · ') || item.EventPkgObjid || `Section ${index + 1}`;
+      const description = [item.PackageSched, item.InstructorName].filter(Boolean).join(' · ');
+      return `<li><strong>${escapeHtml(title)}</strong>${description ? `<span>${escapeHtml(description)}</span>` : ''}</li>`;
+    }),
+    teaListSection('Available sections', allowed, (item, index) => {
+      const title = [item.EventPkgAbbr, item.EventPkgText].filter(Boolean).join(' · ') || item.EventPkgObjid || `Section ${index + 1}`;
+      const description = [item.PackageSched, item.Selected === true ? 'Selected' : ''].filter(Boolean).join(' · ');
+      return `<li><strong>${escapeHtml(title)}</strong>${description ? `<span>${escapeHtml(description)}</span>` : ''}</li>`;
+    }),
+    historySection,
+    attachmentSection,
+  ].filter(Boolean).join('');
+  return body || '<p class="tea-detail-empty">No additional details are available for this request.</p>';
+}
+
+async function openTeaRequestDetails(requestId) {
+  const dialog = document.getElementById('tea-detail-dialog');
+  const title = document.getElementById('tea-detail-title');
+  const subtitle = document.getElementById('tea-detail-subtitle');
+  const status = document.getElementById('tea-detail-status');
+  const body = document.getElementById('tea-detail-body');
+  if (!dialog || !title || !subtitle || !status || !body) return;
+  const sequence = ++teaDetailSequence;
+  const row = teaRequests.find((item) => String(item.RequestID) === String(requestId));
+  title.textContent = row ? `${row.CourseCode || 'TEA request'} · ${row.RequestTypeText || 'Request'}` : 'Request details';
+  subtitle.textContent = row?.CourseTitle || '';
+  status.textContent = 'Loading request details…';
+  body.innerHTML = '';
+  if (!dialog.open) dialog.showModal();
+  try {
+    const result = await sendRuntimeMessage({ type: 'getTeaRequestDetails', requestId });
+    if (sequence !== teaDetailSequence || !dialog.open) return;
+    if (result?.error) {
+      status.textContent = teaErrorMessage(result);
+      return;
+    }
+    const detailRequest = result.request || {};
+    const rowIndex = teaRequests.findIndex((item) => String(item.RequestID) === String(requestId));
+    if (rowIndex >= 0) {
+      teaRequests[rowIndex] = {
+        ...teaRequests[rowIndex],
+        Status: detailRequest.Status || teaRequests[rowIndex].Status,
+        StatusText: detailRequest.StatusText || teaRequests[rowIndex].StatusText,
+        StatusReason: detailRequest.StatusReason || teaRequests[rowIndex].StatusReason,
+        ReasonText: detailRequest.ReasonText || teaRequests[rowIndex].ReasonText,
+      };
+      renderTeaRequests();
+    }
+    title.textContent = `${detailRequest.CourseCode || row?.CourseCode || 'TEA request'} · ${detailRequest.RequestTypeText || row?.RequestTypeText || 'Request'}`;
+    subtitle.textContent = detailRequest.CourseTitle || row?.CourseTitle || '';
+    status.textContent = '';
+    body.innerHTML = renderTeaRequestDetails(result);
+  } catch {
+    if (sequence === teaDetailSequence && dialog.open) status.textContent = teaErrorMessage({ error: 'network' });
+  }
+}
+
+function bindAppTabs() {
+  const plannerTab = document.getElementById('tab-planner');
+  const teaTab = document.getElementById('tab-tea');
+  const plannerPanel = document.getElementById('planner-tab-panel');
+  const teaPanel = document.getElementById('tea-tab-panel');
+  if (!plannerTab || !teaTab || !plannerPanel || !teaPanel) return;
+  const tabs = [plannerTab, teaTab];
+  const panels = [plannerPanel, teaPanel];
+  const activate = (index, focus = false) => {
+    tabs.forEach((tab, tabIndex) => {
+      const selected = tabIndex === index;
+      tab.setAttribute('aria-selected', String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      panels[tabIndex].hidden = !selected;
+      panels[tabIndex].classList.toggle('hidden', !selected);
+    });
+    if (focus) tabs[index].focus();
+    if (index === 1 && !teaRequestsLoaded) loadTeaRequests({ reset: true });
+  };
+  tabs.forEach((tab, index) => tab.addEventListener('click', () => activate(index)));
+  plannerTab.parentElement?.addEventListener('keydown', (event) => {
+    const currentIndex = tabs.indexOf(document.activeElement);
+    if (currentIndex < 0) return;
+    let nextIndex = null;
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % tabs.length;
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (currentIndex + tabs.length - 1) % tabs.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = tabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    activate(nextIndex, true);
+  });
+
+  document.getElementById('tea-refresh')?.addEventListener('click', () => loadTeaRequests({ reset: true }));
+  document.getElementById('tea-load-more')?.addEventListener('click', () => loadTeaRequests());
+  document.getElementById('tea-request-list')?.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-request-id]');
+    if (button?.dataset.requestId) openTeaRequestDetails(button.dataset.requestId);
+  });
+  document.getElementById('tea-detail-close')?.addEventListener('click', () => {
+    document.getElementById('tea-detail-dialog')?.close();
+  });
+  document.getElementById('tea-detail-dialog')?.addEventListener('close', () => {
+    teaDetailSequence++;
+  });
 }
 
 function profileNameParts(personalDetails) {
@@ -2741,6 +2987,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   isPlanner = document.body.classList.contains('full-planner');
+  bindAppTabs();
   planned = await loadPlanned();
   await loadTerm();
   const { personalDetails } = await chrome.storage.local.get('personalDetails');

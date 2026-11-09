@@ -187,6 +187,43 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   top: 0;
   z-index: 20;
 }
+.app-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-subtle);
+}
+.app-tab {
+  min-height: 30px;
+  padding: 5px 13px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.app-tab[aria-selected="true"] {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: var(--shadow);
+}
+.app-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.planner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.tab-panel { min-width: 0; }
 
 .brand {
   display: flex;
@@ -1306,12 +1343,95 @@ body.full-planner #open-planner { display: none; }
 .detail-empty { padding: 10px; color: var(--muted); background: var(--bg-subtle); border-radius: 4px; font-size: 12px; }
 .muted { color: var(--muted); }
 
+/* ===== TEA request browser ===== */
+.tea-tab-panel { padding-bottom: 24px; }
+.tea-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 18px 12px;
+}
+.tea-toolbar h1 { margin: 0 0 4px; font-size: 20px; }
+.tea-toolbar p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.tea-status { margin: 0; padding: 8px 18px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.tea-status:empty { display: none; }
+.tea-request-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 8px 18px; list-style: none; }
+.tea-request-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  color: var(--text);
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.tea-request-card:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.tea-request-card:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.tea-request-main { min-width: 0; }
+.tea-request-course { display: block; margin-bottom: 4px; font-size: 14px; font-weight: 700; overflow-wrap: anywhere; }
+.tea-request-title { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.tea-request-meta { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.tea-request-state { max-width: 190px; padding: 5px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); background: var(--bg-subtle); font-size: 11px; line-height: 1.3; text-align: center; }
+.tea-list-footer { display: flex; justify-content: center; padding: 8px 18px 16px; }
+.tea-detail-dialog {
+  position: fixed;
+  inset: 0;
+  width: min(760px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  max-height: min(90dvh, 900px);
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--modal-shadow);
+}
+.tea-detail-dialog::backdrop { background: var(--backdrop); }
+.tea-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 12px; border-bottom: 1px solid var(--border); }
+.tea-detail-head h2 { margin: 0 0 4px; font-size: 18px; }
+.tea-detail-head p { margin: 0; font-size: 12px; }
+.tea-detail-body { display: flex; flex-direction: column; gap: 16px; max-height: calc(90dvh - 85px); padding: 16px 20px 22px; overflow: auto; }
+.tea-detail-section { padding-bottom: 14px; border-bottom: 1px solid var(--divider); }
+.tea-detail-section:last-child { padding-bottom: 0; border-bottom: 0; }
+.tea-detail-section h3 { margin: 0 0 9px; color: var(--teal-text); font-size: 13px; }
+.tea-detail-grid { display: grid; grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1.8fr); gap: 7px 14px; font-size: 12px; line-height: 1.45; }
+.tea-detail-grid span { color: var(--muted); }
+.tea-detail-grid strong { min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.tea-justification { margin: 0; padding: 10px 12px; color: var(--text); background: var(--bg-subtle); border-radius: 5px; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tea-detail-list { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.tea-detail-list li { padding: 9px 11px; background: var(--bg-subtle); border-radius: 5px; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.tea-detail-list li strong { display: block; margin-bottom: 3px; }
+.tea-detail-list li span { display: block; color: var(--muted); }
+.tea-detail-empty { color: var(--muted); font-size: 12px; }
+
 @media (max-width: 900px) {
   body.full-planner { min-width: 0; }
   html:has(body.full-planner) { min-width: 0; }
   body.full-planner #app { width: 100%; }
   body.full-planner .topbar { flex-wrap: wrap; }
+  body.full-planner .planner-actions { padding: 10px 20px; }
   body.full-planner .calendar { height: 760px; }
   body.full-planner .final-row { grid-template-columns: 1fr 1fr; }
   .detail-meetings li { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 600px) {
+  .topbar { flex-wrap: wrap; }
+  .app-tabs { order: 3; width: 100%; }
+  .app-tab { flex: 1; }
+  .tea-toolbar { padding: 16px 14px 10px; }
+  .tea-request-list { padding-right: 12px; padding-left: 12px; }
+  .tea-request-card { grid-template-columns: minmax(0, 1fr); }
+  .tea-request-state { max-width: none; justify-self: start; }
+  .tea-detail-grid { grid-template-columns: 1fr; gap: 3px; }
+  .tea-detail-grid strong { margin-bottom: 5px; }
+  .tea-detail-body { padding-right: 14px; padding-left: 14px; }
 }

@@ -7,6 +7,7 @@ const TERM_VALUE_HELP_BASE = 'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_
 const BOOKING_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV';
 const PERSONAL_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/BC_OVP_PERSONAL_DETAILS_SRV';
 const TIMETABLE_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/EVENT_TIMETABLE_SRV';
+const TEA_BASE = 'https://tss.ucsd.edu/sap/opu/odata/sap/YTEA_REQUEST_SB_V2';
 const AUTH_START_URL = 'https://sis.ucsd.edu/';
 const CUSTOM_AUTH_START_URL = 'https://tss.ucsd.edu/fiori';
 const TSS_LOGOUT_URL = 'https://tss.ucsd.edu/sap/public/bc/icf/logoff?sap-client=500';
@@ -815,6 +816,142 @@ function parseTssJson(text) {
   }
 }
 
+function parseTeaBatchResponse(text) {
+  const parts = text.split(/\r?\n--[A-Za-z0-9_-]+/);
+  const values = [];
+  for (const part of parts) {
+    const statusMatch = part.match(/HTTP\/1\.[01]\s+(\d{3})\b/);
+    if (!statusMatch) continue;
+    const json = extractJson(part);
+    if (json && Object.hasOwn(json, 'd')) {
+      const data = json.d;
+      values.push(Array.isArray(data?.results) ? data.results : data);
+      continue;
+    }
+    if (json && Array.isArray(json.value)) {
+      values.push(json.value);
+      continue;
+    }
+    const statusIndex = part.indexOf(statusMatch[0]);
+    let bodyStart = part.indexOf('\r\n\r\n', statusIndex);
+    let separatorLength = 4;
+    if (bodyStart < 0) {
+      bodyStart = part.indexOf('\n\n', statusIndex);
+      separatorLength = 2;
+    }
+    if (bodyStart < 0) continue;
+    const body = part.slice(bodyStart + separatorLength).trim();
+    if (/^\d+$/.test(body)) values.push(Number(body));
+  }
+  return values;
+}
+
+async function fetchTeaBatch(getLines, csrfRetry = false) {
+  const auth = await getAuth();
+  if (!authPresent(auth)) return { error: 'no-auth' };
+
+  const boundary = `batch_tea-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const partHeaders = (line) =>
+    `Accept: ${/\/\$count(?:\?|$)/.test(line) ? 'text/plain, */*;q=0.5' : 'application/json'}\r\n` +
+    'Accept-Language: en\r\n' +
+    'sap-cancel-on-close: true\r\n' +
+    'sap-contextid-accept: header\r\n' +
+    (auth.csrfToken ? `x-csrf-token: ${auth.csrfToken}\r\n` : '') +
+    'DataServiceVersion: 2.0\r\n' +
+    'MaxDataServiceVersion: 2.0\r\n' +
+    'X-Requested-With: XMLHttpRequest\r\n';
+  const body = getLines.map((line) =>
+    `--${boundary}\r\n` +
+    'Content-Type: application/http\r\n' +
+    'Content-Transfer-Encoding: binary\r\n\r\n' +
+    `${line} HTTP/1.1\r\n${partHeaders(line)}\r\n\r\n`
+  ).join('') + `--${boundary}--\r\n`;
+
+  let response;
+  try {
+    response = await fetch(`${TEA_BASE}/$batch?sap-client=500`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/mixed; boundary=${boundary}`,
+        Accept: 'multipart/mixed',
+        'Accept-Language': 'en',
+        ...optionalAuthHeaders(auth),
+        'x-requested-with': 'XMLHttpRequest',
+        'odata-maxversion': '2.0',
+        'odata-version': '2.0',
+        'sap-contextid-accept': 'header',
+      },
+      credentials: 'include',
+      redirect: 'manual',
+      body,
+    });
+  } catch (error) {
+    return { error: 'network', message: error.message };
+  }
+  if (isAuthResponse(response)) {
+    if (!csrfRetry && response.status === 403) {
+      await ensureCsrfToken(true);
+      return fetchTeaBatch(getLines, true);
+    }
+    return { error: 'auth-expired', status: response.status };
+  }
+  if (!response.ok) return { error: 'http', status: response.status };
+
+  const text = await response.text();
+  const innerError = batchError(text);
+  if (innerError) {
+    if (!csrfRetry && innerError.status === 403) {
+      await ensureCsrfToken(true);
+      return fetchTeaBatch(getLines, true);
+    }
+    return innerError;
+  }
+  const values = parseTeaBatchResponse(text);
+  if (values.length !== getLines.length) return { error: 'parse' };
+  return { values };
+}
+
+async function getTeaRequests({ skip = 0, top = 20 } = {}) {
+  const start = Number(skip);
+  const pageSize = Number(top);
+  if (!Number.isInteger(start) || start < 0 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+    return { error: 'invalid-request' };
+  }
+  const select = 'RequestID,Status,StatusText,StatusReason,ReasonText,RequestTypeText,CourseTitle,AcademicYearText,RequestDateTime,StatusIcon,AcademicSessionText,CourseCode';
+  const result = await fetchTeaBatch([
+    'GET Requests/$count?sap-client=500',
+    `GET Requests?sap-client=500&$skip=${start}&$top=${pageSize}&$orderby=RequestDateTime%20desc&$select=${encodeURIComponent(select)}`,
+  ]);
+  if (result.error) return result;
+  const [count, requests] = result.values;
+  if (!Number.isInteger(count) || count < 0 || !Array.isArray(requests)
+      || requests.length > pageSize || (requests.length === 0 && start < count)) return { error: 'parse' };
+  return {
+    count,
+    requests,
+    nextSkip: start + requests.length < count ? start + requests.length : null,
+  };
+}
+
+async function getTeaRequestDetails(requestId) {
+  const id = String(requestId || '');
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return { error: 'invalid-request' };
+  const filter = (property) => encodeURIComponent(`${property} eq '${id}'`);
+  const result = await fetchTeaBatch([
+    `GET Requests('${id}')?sap-client=500`,
+    `GET Attachments?sap-client=500&$filter=${filter('RequestID')}`,
+    `GET ReqAllowedSections?sap-client=500&$filter=${filter('RequestID')}`,
+    `GET RequestHistory?sap-client=500&$orderby=dateTimeStamp%20asc&$filter=${filter('requestID')}`,
+    `GET RequestEventPackages?sap-client=500&$filter=${filter('RequestID')}`,
+  ]);
+  if (result.error) return result;
+  const [request, attachments, allowedSections, history, eventPackages] = result.values;
+  if (!request || typeof request !== 'object' || Array.isArray(request)
+      || !Array.isArray(attachments) || !Array.isArray(allowedSections)
+      || !Array.isArray(history) || !Array.isArray(eventPackages)) return { error: 'parse' };
+  return { request, attachments, allowedSections, history, eventPackages };
+}
+
 async function fetchTermValueHelp({ service, entity, property, select, orderBy }, auth) {
   const boundary = `batch_id-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const serviceParams = `0001;ps=%27srvd-yucsd_con_module_servicedef-0001%27;va=%27com.sap.gateway.srvd.yucsd_con_module_servicedef.v0001.et-yucsd_con_module.${property}%27`;
@@ -1496,6 +1633,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'getPersonalDetails') {
     trackApiResult(msg.type, fetchPersonalDetails()).then(sendResponse).catch(() => sendResponse({ error: 'background' }));
+    return true;
+  }
+  if (msg.type === 'getTeaRequests') {
+    if (!isExtensionPageSender(sender)) return false;
+    trackApiResult(msg.type, getTeaRequests(msg)).then(sendResponse).catch(() => sendResponse({ error: 'background' }));
+    return true;
+  }
+  if (msg.type === 'getTeaRequestDetails') {
+    if (!isExtensionPageSender(sender)) return false;
+    trackApiResult(msg.type, getTeaRequestDetails(msg.requestId)).then(sendResponse).catch(() => sendResponse({ error: 'background' }));
     return true;
   }
   if (msg.type === 'getTimetable') {
