@@ -1,6 +1,7 @@
 const DAYS = ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'];
-const DEFAULT_TERM = { academicYear: '2026', academicPeriod: '2' };
-const PERIOD_CODE = { '1': 'FA', '2': 'WI', '3': 'SP', '4': 'SU' };
+const DEFAULT_TERM = { academicYear: '2026', academicPeriod: '3' };
+const LEGACY_DEFAULT_TERM = { academicYear: '2026', academicPeriod: '2' };
+const PERIOD_CODE = { '1': 'SU', '2': 'FA', '3': 'WI', '4': 'SP' };
 
 let planned = [];
 let currentTerm = null;
@@ -17,6 +18,9 @@ const singleClassRefreshes = new Map();
 let singleRefreshQueue = Promise.resolve();
 let personalRefreshPromise = null;
 let scheduleSyncActive = false;
+let searchOperationActive = false;
+let searchExportFadeTimer = null;
+let searchExportHideTimer = null;
 
 function sendRuntimeMessage(message, timeoutMs = 20000) {
   let timeoutId;
@@ -109,14 +113,111 @@ async function loadPlanned() {
 
 async function loadTerm() {
   const { currentTerm: t } = await chrome.storage.local.get('currentTerm');
-  currentTerm = t || DEFAULT_TERM;
+  const staleDefault = String(t?.academicYear) === LEGACY_DEFAULT_TERM.academicYear
+    && String(t?.academicPeriod) === LEGACY_DEFAULT_TERM.academicPeriod;
+  currentTerm = !t || staleDefault ? DEFAULT_TERM : t;
+  if (!t || staleDefault) await chrome.storage.local.set({ currentTerm });
   return currentTerm;
+}
+
+function termCalendarYear(term) {
+  const academicYear = Number(term.academicYear);
+  return String(academicYear + (String(term.academicPeriod) === '2' ? 0 : 1));
 }
 
 function termBadge(term) {
   const code = PERIOD_CODE[term.academicPeriod] || '?';
-  const yr = String(term.academicYear).slice(-2);
+  const yr = termCalendarYear(term).slice(-2);
   return `${code}${yr}`;
+}
+
+function renderCurrentTerm() {
+  const badge = document.getElementById('term-badge');
+  if (!badge) return;
+  const description = termDescription(currentTerm || DEFAULT_TERM);
+  badge.textContent = termBadge(currentTerm || DEFAULT_TERM);
+  badge.title = `Current term: ${description}. Click to change.`;
+  badge.setAttribute('aria-label', `Current term: ${description}. Choose academic year and quarter.`);
+}
+
+function termDescription(term) {
+  const quarter = { '1': 'Summer', '2': 'Fall', '3': 'Winter', '4': 'Spring' }[String(term.academicPeriod)] || 'Academic';
+  const year = termCalendarYear(term);
+  return `${quarter} Quarter ${year} (academic year ${term.academicYear}/${Number(term.academicYear) + 1})`;
+}
+
+async function openTermPicker() {
+  const dialog = document.getElementById('term-dialog');
+  const yearSelect = document.getElementById('term-year');
+  const periodSelect = document.getElementById('term-period');
+  const status = document.getElementById('term-picker-status');
+  const saveButton = document.getElementById('term-save');
+  if (!dialog || !yearSelect || !periodSelect || !status || !saveButton || dialog.open) return;
+
+  dialog.showModal();
+  status.textContent = 'Loading terms from TSS…';
+  yearSelect.disabled = true;
+  periodSelect.disabled = true;
+  saveButton.disabled = true;
+
+  let response;
+  try {
+    response = await sendRuntimeMessage({ type: 'getTermOptions' }, 30000);
+  } catch {
+    response = { error: 'network' };
+  }
+  if (!dialog.open) return;
+  if (response?.error || !response?.years?.length || !response?.periods?.length) {
+    status.textContent = response?.error === 'no-auth' || response?.error === 'auth-expired'
+      ? 'Sign in to TSS to load the available years and quarters.'
+      : 'Could not load the available years and quarters from TSS. Try again.';
+    return;
+  }
+
+  yearSelect.replaceChildren(...response.years.map(({ value, label }) => {
+    const option = document.createElement('option');
+    option.value = String(value);
+    option.textContent = String(label || value);
+    return option;
+  }));
+  periodSelect.replaceChildren(...response.periods.map(({ value, label }) => {
+    const option = document.createElement('option');
+    option.value = String(value);
+    option.textContent = String(label || value);
+    return option;
+  }));
+
+  const selectedYear = response.years.some(({ value }) => String(value) === String(currentTerm.academicYear))
+    ? String(currentTerm.academicYear)
+    : String(response.years[response.years.length - 1].value);
+  const selectedPeriod = response.periods.some(({ value }) => String(value) === String(currentTerm.academicPeriod))
+    ? String(currentTerm.academicPeriod)
+    : String(response.periods[0].value);
+  yearSelect.value = selectedYear;
+  periodSelect.value = selectedPeriod;
+  yearSelect.disabled = false;
+  periodSelect.disabled = false;
+  saveButton.disabled = false;
+  status.textContent = 'Choose the year and quarter used for course search.';
+}
+
+function bindTermPicker() {
+  const badge = document.getElementById('term-badge');
+  const dialog = document.getElementById('term-dialog');
+  const closeButton = document.getElementById('term-cancel');
+  const saveButton = document.getElementById('term-save');
+  if (!badge || !dialog || !closeButton || !saveButton) return;
+  badge.addEventListener('click', openTermPicker);
+  closeButton.addEventListener('click', () => dialog.close());
+  saveButton.addEventListener('click', async () => {
+    const academicYear = document.getElementById('term-year').value;
+    const academicPeriod = document.getElementById('term-period').value;
+    if (!/^\d{4}$/.test(academicYear) || !/^\d+$/.test(academicPeriod)) return;
+    currentTerm = { academicYear, academicPeriod };
+    await chrome.storage.local.set({ currentTerm });
+    renderCurrentTerm();
+    dialog.close();
+  });
 }
 
 // ---------- Time / schedule parsing ----------
@@ -676,8 +777,10 @@ function renderPlannedList() {
   const list = document.getElementById('planned-list');
   const empty = document.getElementById('planned-empty');
   const count = document.getElementById('planned-count');
+  const exportAllButton = document.getElementById('export-all-planned');
   list.innerHTML = '';
   count.textContent = planned.length;
+  if (exportAllButton) exportAllButton.disabled = planned.length === 0;
   if (planned.length === 0) {
     empty.classList.remove('hidden');
     renderFinalsList();
@@ -747,6 +850,7 @@ function renderPlannedList() {
           <span class="planned-info-label">Credits:</span>
           <span>${escapeHtml(cls.credits || '—')}</span>
         </div>
+        <button class="btn btn-small js-export-planned" type="button" data-id="${escapeHtml(cls.id)}">Export JSON</button>
         ${cls.unavailable ? '<div class="conflict-note conflict-schedule">Selected section is no longer listed by TSS</div>' : ''}
         ${conflictNote}
       </div>
@@ -775,6 +879,14 @@ function renderPlannedList() {
       const id = e.currentTarget.dataset.id;
       const cls = planned.find((c) => c.id === id);
       if (cls) openRequirementsModal(cls);
+    });
+  });
+  list.querySelectorAll('.js-export-planned').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      const cls = planned.find((item) => item.id === e.currentTarget.dataset.id);
+      if (!cls) return;
+      const section = plannedSectionExportRecord(cls);
+      exportJsonDownload(`${cls.courseAbbr}-${section.sectionId || 'planned-section'}`, [section]);
     });
   });
   list.querySelectorAll('.js-refresh-class').forEach((btn) => {
@@ -1772,14 +1884,14 @@ function renderSearchResults(results) {
   showSearchResults(true);
 }
 
-function renderSearchLoading() {
+function renderSearchLoading(queryCount = 1) {
   const list = document.getElementById('results-list');
   const count = document.getElementById('results-count');
   list.innerHTML = '';
   count.textContent = '…';
   const loading = document.createElement('li');
   loading.className = 'results-loading';
-  loading.textContent = 'Searching…';
+  loading.textContent = queryCount > 1 ? `Searching ${queryCount} courses...` : 'Searching...';
   list.appendChild(loading);
   showSearchResults(true);
 }
@@ -1791,41 +1903,172 @@ function normalizeSearchQuery(value) {
   return `${match[1].toUpperCase()}-${match[2].padStart(3, '0')}${match[3].toUpperCase()}`;
 }
 
+function splitSearchQueries(value) {
+  const queries = String(value || '').split(',').map(normalizeSearchQuery).filter(Boolean);
+  return [...new Set(queries)];
+}
+
+function searchFailure(code, query, status, message) {
+  const error = new Error(message || code || 'Search failed');
+  error.code = code || 'search';
+  error.query = query || null;
+  error.status = status || null;
+  return error;
+}
+
+async function searchCourses(queries, term, onProgress = null) {
+  const courses = new Map();
+  for (let index = 0; index < queries.length; index++) {
+    const query = queries[index];
+    let response;
+    try {
+      response = await sendRuntimeMessage({ type: 'searchClasses', term, query }, 30000);
+    } catch (error) {
+      throw searchFailure('network', query, null, error.message);
+    }
+    if (!response) throw searchFailure('background', query, null, 'No response from the background worker.');
+    if (response.error) {
+      throw searchFailure(response.error, query, response.status,
+        `${response.error}${response.status ? ` (${response.status})` : ''}`);
+    }
+    for (const course of response.results || []) {
+      const key = course.moduleID || `${course.courseAbbr}|${course.courseTitle}`;
+      if (!courses.has(key)) courses.set(key, course);
+    }
+    onProgress?.({ completed: index + 1, total: queries.length, query });
+  }
+  return [...courses.values()];
+}
+
+function setSearchControlsDisabled(disabled) {
+  const searchButton = document.getElementById('search-btn');
+  const exportButton = document.getElementById('save-search-json');
+  if (searchButton) searchButton.disabled = disabled;
+  if (exportButton) exportButton.disabled = disabled;
+  searchOperationActive = disabled;
+}
+
+function clearSearchExportProgress() {
+  window.clearTimeout(searchExportFadeTimer);
+  window.clearTimeout(searchExportHideTimer);
+  searchExportFadeTimer = null;
+  searchExportHideTimer = null;
+  const status = document.getElementById('search-export-status');
+  if (!status) return;
+  status.classList.add('hidden');
+  status.classList.remove('is-fading', 'has-error');
+}
+
+function updateSearchExportProgress(message, value, error = false) {
+  const status = document.getElementById('search-export-status');
+  const text = document.getElementById('search-export-message');
+  const progress = document.getElementById('search-export-progress');
+  const fill = document.getElementById('search-export-progress-fill');
+  if (!status || !text || !progress || !fill) return;
+  status.classList.remove('hidden', 'is-fading');
+  status.classList.toggle('has-error', error);
+  text.textContent = message;
+  const percent = Math.max(0, Math.min(100, Math.round(value)));
+  progress.setAttribute('aria-valuenow', String(percent));
+  fill.style.width = `${percent}%`;
+}
+
+function finishSearchExportProgress(message) {
+  updateSearchExportProgress(message, 100);
+  const status = document.getElementById('search-export-status');
+  if (!status) return;
+  window.clearTimeout(searchExportFadeTimer);
+  window.clearTimeout(searchExportHideTimer);
+  searchExportFadeTimer = window.setTimeout(() => {
+    status.classList.add('is-fading');
+    searchExportHideTimer = window.setTimeout(() => status.classList.add('hidden'), 1000);
+  }, 500);
+}
+
 async function doSearch() {
+  if (searchOperationActive) return;
   const input = document.getElementById('search-input');
-  const q = normalizeSearchQuery(input.value);
-  if (!q) {
+  const queries = splitSearchQueries(input.value);
+  if (!queries.length) {
+    clearSearchExportProgress();
     showSearchResults(false);
     return;
   }
-  input.value = q;
-  await loadTerm();
-  renderSearchLoading();
-  let resp;
+  input.value = queries.join(', ');
+  clearSearchExportProgress();
+  setSearchControlsDisabled(true);
   try {
-    resp = await sendRuntimeMessage({ type: 'searchClasses', term: currentTerm, query: q }, 30000);
-  } catch (e) {
-    showAuthBanner('error', e.message);
+    await loadTerm();
+    renderSearchLoading(queries.length);
+    const results = await searchCourses(queries, currentTerm);
+    hideAuthBanner();
+    renderSearchResults(results);
+  } catch (error) {
+    if (error.code === 'no-auth' || error.code === 'auth-expired') showAuthBanner('expired');
+    else showAuthBanner('error', `${error.query ? `${error.query}: ` : ''}${error.message}`);
     showSearchResults(false);
+  } finally {
+    setSearchControlsDisabled(false);
+  }
+}
+
+async function saveSearchResultsAsJson() {
+  if (searchOperationActive) return;
+  const input = document.getElementById('search-input');
+  const queries = splitSearchQueries(input.value);
+  if (!queries.length) {
+    input.focus();
     return;
   }
-  if (!resp) {
-    showAuthBanner('error', 'no response from background');
-    showSearchResults(false);
-    return;
+
+  clearSearchExportProgress();
+  setSearchControlsDisabled(true);
+  updateSearchExportProgress(`Searching 1 of ${queries.length}: ${queries[0]}`, 0);
+  let progress = 0;
+  try {
+    await loadTerm();
+    const courses = await searchCourses(queries, currentTerm, ({ completed, total, query }) => {
+      progress = Math.round((completed / total) * 35);
+      updateSearchExportProgress(`Searching ${completed} of ${total}: ${query}`, progress);
+    });
+    updateSearchExportProgress(`Found ${courses.length} matching classes. Loading sections...`, 40);
+
+    const sections = [];
+    for (let index = 0; index < courses.length; index++) {
+      const course = courses[index];
+      let response;
+      try {
+        response = await sendRuntimeMessage({ type: 'getSections', moduleID: course.moduleID, term: currentTerm }, 30000);
+      } catch (error) {
+        throw searchFailure('network', null, null, `${course.courseAbbr}: ${error.message}`);
+      }
+      if (!response || response.error) {
+        const detail = !response ? 'No response from the background worker.'
+          : `${response.error}${response.status ? ` (${response.status})` : ''}`;
+        const error = searchFailure(response?.error || 'background', null, response?.status, `${course.courseAbbr}: ${detail}`);
+        error.courseAbbr = course.courseAbbr;
+        throw error;
+      }
+      const packages = groupSections(response.sections || []);
+      sections.push(...packages.map((pkg) => sectionExportRecord(course, pkg)));
+      progress = 40 + Math.round(((index + 1) / Math.max(courses.length, 1)) * 55);
+      updateSearchExportProgress(`Loading sections ${index + 1} of ${courses.length}: ${course.courseAbbr}`, progress);
+    }
+
+    updateSearchExportProgress('Preparing JSON download...', 97);
+    const filename = `${queries.join('-')}-sections`;
+    exportJsonDownload(filename, sections);
+    finishSearchExportProgress(`Exported ${sections.length} sections from ${courses.length} matching classes.`);
+  } catch (error) {
+    const context = error.courseAbbr || error.query;
+    const detail = context ? error.message.replace(`${context}: `, '') : error.message;
+    const message = context ? `${context}: ${detail}` : detail;
+    updateSearchExportProgress(`Export failed: ${message}`, progress, true);
+    if (error.code === 'no-auth' || error.code === 'auth-expired') showAuthBanner('expired');
+    else showAuthBanner('error', message);
+  } finally {
+    setSearchControlsDisabled(false);
   }
-  if (resp.error === 'no-auth' || resp.error === 'auth-expired') {
-    showAuthBanner('expired');
-    showSearchResults(false);
-    return;
-  }
-  if (resp.error) {
-    showAuthBanner('error', `${resp.error}${resp.status ? ` (${resp.status})` : ''}`);
-    showSearchResults(false);
-    return;
-  }
-  hideAuthBanner();
-  renderSearchResults(resp.results || []);
 }
 
 async function onResultClick(course) {
@@ -1985,6 +2228,79 @@ function openRequirementsModal(cls) {
 }
 
 // ---------- Section picker modal ----------
+function jsonFinalDate(value) {
+  const match = String(value || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  return match ? `${match[3]}-${match[1].padStart(2, '0')}-${match[2].padStart(2, '0')}` : null;
+}
+
+function sectionExportRecord(course, pkg) {
+  const weeklyMeetings = { lecture: new Map(), discussion: new Map(), lab: new Map() };
+  let finalExam = null;
+  for (const block of pkg.scheduleBlocks || []) {
+    if (block.isFinal) {
+      finalExam ||= {
+        date: jsonFinalDate(block.finalDate),
+        startTime: block.start || null,
+        endTime: block.end || null,
+      };
+      continue;
+    }
+    const category = { le: 'lecture', di: 'discussion', lab: 'lab' }[meetingTypeClass(block.type)];
+    if (!category || !DAYS.includes(block.day)) continue;
+    if (!block.start || !block.end) continue;
+    const key = `${block.start}|${block.end}`;
+    if (!weeklyMeetings[category].has(key)) {
+      weeklyMeetings[category].set(key, { startTime: block.start, endTime: block.end, days: new Set() });
+    }
+    weeklyMeetings[category].get(key).days.add(block.day);
+  }
+  const sortedDays = (days) => DAYS.filter((day) => days.has(day));
+  const sortedMeetings = (category) => [...weeklyMeetings[category].values()]
+    .map((meeting) => ({ ...meeting, days: sortedDays(meeting.days) }))
+    .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime));
+  const sectionId = pkg.displayID || pkg.otjid || course.selectedPackageDisplayID || course.selectedPackageOtjid || null;
+  return {
+    courseCode: course.courseAbbr || null,
+    courseName: course.courseTitle || null,
+    sectionName: pkg.pkgText || (sectionId ? `${course.courseAbbr} ${sectionId}` : course.courseTitle) || null,
+    sectionId: sectionId == null ? null : String(sectionId),
+    lectureMeetings: sortedMeetings('lecture'),
+    discussionMeetings: sortedMeetings('discussion'),
+    labMeetings: sortedMeetings('lab'),
+    finalExam,
+    professorName: pkg.instructor || course.instructor || null,
+    openSeats: pkg.seatsAvailable ?? course.seatsAvailable ?? null,
+    totalWaitlist: pkg.waitlistTotal ?? course.waitlistTotal ?? null,
+  };
+}
+
+function plannedSectionExportRecord(cls) {
+  const pkg = cls._lastPkg || {};
+  return sectionExportRecord(cls, {
+    ...pkg,
+    pkgText: pkg.pkgText || cls.sectionName,
+    displayID: pkg.displayID || cls.selectedPackageDisplayID || cls.syncedSections?.join(', '),
+    otjid: pkg.otjid || cls.selectedPackageOtjid,
+    scheduleBlocks: cls.scheduleBlocks?.length ? cls.scheduleBlocks : (pkg.scheduleBlocks || []),
+    instructor: pkg.instructor || cls.instructor,
+    seatsAvailable: pkg.seatsAvailable ?? cls.seatsAvailable,
+    waitlistTotal: pkg.waitlistTotal ?? cls.waitlistTotal,
+  });
+}
+
+function exportJsonDownload(filename, data) {
+  const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${String(filename || 'export').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'export'}.json`;
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function openSectionPicker(course, packages, term, replaceClassId = null) {
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
@@ -2041,9 +2357,15 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
         <button class="modal-close">&times;</button>
       </div>
       <div class="modal-body">${optionsHtml}</div>
-      <div class="modal-foot">
-        <button class="btn js-modal-cancel">Cancel</button>
-        <button class="btn btn-primary js-modal-add" disabled>Add to Plan</button>
+      <div class="modal-foot section-picker-foot">
+        <div class="section-picker-export">
+          <button class="btn btn-small js-export-all" type="button">Export all as JSON</button>
+          <button class="btn btn-small js-export-selected" type="button" disabled>Export selected as JSON</button>
+        </div>
+        <div class="section-picker-actions">
+          <button class="btn js-modal-cancel" type="button">Cancel</button>
+          <button class="btn btn-primary js-modal-add" type="button" disabled>Add to Plan</button>
+        </div>
       </div>
     </div>`;
   document.body.appendChild(backdrop);
@@ -2055,6 +2377,7 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
       opt.classList.add('selected');
       selectedIdx = parseInt(opt.dataset.idx, 10);
       backdrop.querySelector('.js-modal-add').disabled = false;
+      backdrop.querySelector('.js-export-selected').disabled = false;
     });
   });
 
@@ -2062,6 +2385,16 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
   backdrop.querySelector('.modal-close').addEventListener('click', close);
   backdrop.querySelector('.js-modal-cancel').addEventListener('click', close);
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+
+  backdrop.querySelector('.js-export-all').addEventListener('click', () => {
+    const sections = packages.map((pkg) => sectionExportRecord(course, pkg));
+    exportJsonDownload(`${course.courseAbbr}-all-sections`, sections);
+  });
+  backdrop.querySelector('.js-export-selected').addEventListener('click', () => {
+    if (selectedIdx === null) return;
+    const pkg = packages[selectedIdx];
+    exportJsonDownload(`${course.courseAbbr}-${pkg.displayID || pkg.otjid}`, [sectionExportRecord(course, pkg)]);
+  });
 
   backdrop.querySelector('.js-modal-add').addEventListener('click', () => {
     if (selectedIdx === null) {
@@ -2080,6 +2413,7 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
       academicPeriod: course.academicPeriod || term.academicPeriod,
       departmentAbbr: course.departmentAbbr,
       selectedPackageOtjid: pkg.otjid,
+      selectedPackageDisplayID: pkg.displayID || '',
       eventPkgObjid: pkg.objid,
       seatsAvailable: pkg.seatsAvailable,
       seatsTotal: pkg.seatsTotal,
@@ -2411,7 +2745,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadTerm();
   const { personalDetails } = await chrome.storage.local.get('personalDetails');
   renderPersonalProfile(personalDetails || null);
-  document.getElementById('term-badge').textContent = termBadge(currentTerm);
+  renderCurrentTerm();
+  bindTermPicker();
   const { lastRefreshRun } = await chrome.storage.local.get('lastRefreshRun');
   renderAll();
   const refreshMeta = document.getElementById('refresh-meta');
@@ -2462,6 +2797,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (isPlanner) refreshAllClasses();
     else chrome.tabs.create({ url: `${chrome.runtime.getURL('planner.html')}?refresh=all` });
   });
+  const exportAllPlannedButton = document.getElementById('export-all-planned');
+  if (exportAllPlannedButton) exportAllPlannedButton.addEventListener('click', () => {
+    if (planned.length) exportJsonDownload('planned-classes', planned.map(plannedSectionExportRecord));
+  });
   const syncButton = document.getElementById('sync-schedule');
   if (syncButton) syncButton.addEventListener('click', syncSchedule);
   const stopButton = document.getElementById('stop-refresh');
@@ -2469,7 +2808,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const input = document.getElementById('search-input');
   const searchBtn = document.getElementById('search-btn');
+  const saveSearchJsonButton = document.getElementById('save-search-json');
   searchBtn.addEventListener('click', doSearch);
+  if (saveSearchJsonButton) saveSearchJsonButton.addEventListener('click', saveSearchResultsAsJson);
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
 
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -2485,7 +2826,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if (changes.currentTerm) {
       currentTerm = changes.currentTerm.newValue || DEFAULT_TERM;
-      document.getElementById('term-badge').textContent = termBadge(currentTerm);
+      renderCurrentTerm();
     }
     if (changes.lastRefreshRun) {
       const run = changes.lastRefreshRun.newValue;

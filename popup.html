@@ -24,7 +24,7 @@
           </div>
         </div>
       </div>
-      <div id="term-badge" class="term-badge" title="Current term">—</div>
+      <button id="term-badge" class="term-badge" type="button" title="Choose academic year and quarter" aria-label="Current term: WI27. Choose academic year and quarter" aria-haspopup="dialog" aria-controls="term-dialog">WI27</button>
       <button id="open-planner" class="btn btn-small">Full planner</button>
       <button id="sync-schedule" class="btn btn-small" type="button">Sync schedule</button>
       <div class="topbar-right">
@@ -40,6 +40,11 @@
       <div class="search-wrap">
         <input id="search-input" type="text" placeholder="Search courses (e.g. PHYS 002C, CSE 12)..." autocomplete="off">
         <button id="search-btn" class="btn btn-primary">Search</button>
+        <button id="save-search-json" class="btn" type="button">Save all as JSON</button>
+      </div>
+      <div id="search-export-status" class="search-export-status hidden" role="status" aria-live="polite">
+        <span id="search-export-message" class="search-export-message"></span>
+        <div id="search-export-progress" class="search-export-progress" role="progressbar" aria-label="Search and JSON export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="search-export-progress-fill"></span></div>
       </div>
     </div>
 
@@ -120,6 +125,7 @@
         <div class="refresh-actions">
           <button id="stop-refresh" class="btn btn-small btn-stop hidden" type="button">Stop refresh</button>
           <button id="refresh-all" class="btn btn-small">Refresh all class info</button>
+          <button id="export-all-planned" class="btn btn-small" type="button" disabled>Export all as JSON</button>
         </div>
       </div>
       <div id="refresh-status" class="refresh-status hidden" role="status">
@@ -137,6 +143,20 @@
     </section>
 
   </div>
+  <dialog id="term-dialog" class="term-dialog" aria-labelledby="term-dialog-title">
+    <h2 id="term-dialog-title">Choose term</h2>
+    <p id="term-picker-status" class="term-picker-status" role="status">Loading terms from TSS…</p>
+    <div class="term-picker-fields">
+      <label for="term-year">Academic year</label>
+      <select id="term-year" class="term-select" disabled></select>
+      <label for="term-period">Quarter</label>
+      <select id="term-period" class="term-select" disabled></select>
+    </div>
+    <div class="term-dialog-actions">
+      <button id="term-cancel" class="btn" type="button">Cancel</button>
+      <button id="term-save" class="btn btn-primary" type="button" disabled>Use term</button>
+    </div>
+  </dialog>
   <dialog id="logout-dialog" class="logout-dialog" aria-labelledby="logout-dialog-title">
     <h2 id="logout-dialog-title">Log out of UCSD?</h2>
     <p>This will end your UCSD TSS session. Are you sure?</p>

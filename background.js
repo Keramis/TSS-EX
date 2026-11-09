@@ -3,6 +3,7 @@
 
 const MODULE_BASE =
   'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd/sap/yucsd_con_module_servicedef/0001';
+const TERM_VALUE_HELP_BASE = 'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd_f4';
 const BOOKING_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV';
 const PERSONAL_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/BC_OVP_PERSONAL_DETAILS_SRV';
 const TIMETABLE_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/EVENT_TIMETABLE_SRV';
@@ -814,6 +815,96 @@ function parseTssJson(text) {
   }
 }
 
+async function fetchTermValueHelp({ service, entity, property, select, orderBy }, auth) {
+  const boundary = `batch_id-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const serviceParams = `0001;ps=%27srvd-yucsd_con_module_servicedef-0001%27;va=%27com.sap.gateway.srvd.yucsd_con_module_servicedef.v0001.et-yucsd_con_module.${property}%27`;
+  const serviceUrl = `${TERM_VALUE_HELP_BASE}/sap/${service}/${serviceParams}/$batch`;
+  const getLine = `GET ${entity}?$select=${select}&$orderby=${orderBy}&$skip=0&$top=100 HTTP/1.1`;
+  const partHeaders =
+    'Accept: application/json;odata.metadata=minimal;IEEE754Compatible=true\r\n' +
+    'Accept-Language: en\r\n' +
+    (auth.csrfToken ? `X-CSRF-Token: ${auth.csrfToken}\r\n` : '') +
+    'Content-Type: application/json;charset=UTF-8;IEEE754Compatible=true\r\n';
+  const body =
+    `--${boundary}\r\n` +
+    'Content-Type: application/http\r\n' +
+    'Content-Transfer-Encoding: binary\r\n\r\n' +
+    `${getLine}\r\n${partHeaders}\r\n` +
+    '\r\n' +
+    `--${boundary}--\r\n`;
+
+  let response;
+  try {
+    response = await fetch(serviceUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/mixed; boundary=${boundary}`,
+        Accept: 'multipart/mixed',
+        'Accept-Language': 'en',
+        'odata-maxversion': '4.0',
+        'odata-version': '4.0',
+        ...optionalAuthHeaders(auth),
+        'x-requested-with': 'XMLHttpRequest',
+        'x-xhr-logon': 'accept="iframe,strict-window,window"',
+      },
+      credentials: 'include',
+      redirect: 'manual',
+      body,
+    });
+  } catch (error) {
+    return { error: 'network', message: error.message };
+  }
+  if (isAuthResponse(response)) return { error: 'auth-expired', status: response.status };
+  if (!response.ok) return { error: 'http', status: response.status };
+
+  const text = await response.text();
+  const innerError = batchError(text);
+  if (innerError) return innerError;
+  const values = parseBatchResponse(text);
+  if (!values.length) return { error: 'parse' };
+  return { values };
+}
+
+async function getTermOptions(csrfRetry = false) {
+  const auth = await getAuth();
+  if (!authPresent(auth)) return { error: 'no-auth' };
+  const [yearResult, periodResult] = await Promise.all([
+    fetchTermValueHelp({
+      service: 'yucsd_i_peryrt_soc',
+      entity: 'YUCSD_I_PERYRT_SOC',
+      property: 'academicyear',
+      select: 'Peryr,Peryt,Spras',
+      orderBy: 'Peryt',
+    }, auth),
+    fetchTermValueHelp({
+      service: 'yucsd_i_peridt_soc',
+      entity: 'YUCSD_I_PERIDT_SOC',
+      property: 'academicperiod',
+      select: 'Perid,Perit,Spras',
+      orderBy: 'Perit',
+    }, auth),
+  ]);
+  const error = yearResult.error ? yearResult : periodResult.error ? periodResult : null;
+  if (error) {
+    if (!csrfRetry && error.status === 403) {
+      await ensureCsrfToken(true);
+      return getTermOptions(true);
+    }
+    return error;
+  }
+
+  const years = yearResult.values
+    .filter((row) => !row.Spras || row.Spras === 'EN')
+    .map((row) => ({ value: String(row.Peryr), label: String(row.Peryt || row.Peryr) }))
+    .filter((row) => /^\d{4}$/.test(row.value));
+  const periods = periodResult.values
+    .filter((row) => !row.Spras || row.Spras === 'EN')
+    .map((row) => ({ value: String(row.Perid), label: String(row.Perit || row.Perid) }))
+    .filter((row) => /^\d+$/.test(row.value));
+  if (!years.length || !periods.length) return { error: 'parse' };
+  return { years, periods };
+}
+
 // ----- API: search classes -----
 async function searchClasses(term, query, csrfRetry = false) {
   const auth = await getAuth();
@@ -1389,6 +1480,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     trackApiResult(msg.type, searchClasses(msg.term, msg.query))
       .then(sendResponse)
       .catch(() => sendResponse({ error: 'background' }));
+    return true;
+  }
+  if (msg.type === 'getTermOptions') {
+    trackApiResult(msg.type, getTermOptions()).then(sendResponse).catch(() => sendResponse({ error: 'background' }));
     return true;
   }
   if (msg.type === 'getSections') {
