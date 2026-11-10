@@ -27,6 +27,7 @@
       <div class="app-tabs" role="tablist" aria-label="Extension sections">
         <button id="tab-planner" class="app-tab" type="button" role="tab" aria-selected="true" aria-controls="planner-tab-panel" tabindex="0">Planner</button>
         <button id="tab-tea" class="app-tab" type="button" role="tab" aria-selected="false" aria-controls="tea-tab-panel" tabindex="-1">TEA Requests</button>
+        <button id="tab-academic-history" class="app-tab" type="button" role="tab" aria-selected="false" aria-controls="academic-history-tab-panel" tabindex="-1">Academic History</button>
       </div>
       <div class="topbar-right">
         <button id="reauth-mode-toggle" class="reauth-mode-toggle" type="button" role="switch" aria-checked="false" aria-label="Re-auth method: Intercept" title="Re-auth method: Intercept (I)">I</button>
@@ -164,6 +165,18 @@
       <div class="tea-list-footer">
         <button id="tea-load-more" class="btn hidden" type="button">Load more</button>
       </div>
+    </section>
+
+    <section id="academic-history-tab-panel" class="tab-panel academic-history-panel hidden" role="tabpanel" aria-labelledby="tab-academic-history" tabindex="0" hidden>
+      <div class="tea-toolbar">
+        <div>
+          <h1>Academic History</h1>
+          <p>Review your courses, registration history, and academic records.</p>
+        </div>
+        <button id="academic-history-refresh" class="btn btn-small" type="button">Refresh</button>
+      </div>
+      <p id="academic-history-status" class="tea-status" role="status" aria-live="polite">Select Academic History to load your records.</p>
+      <div id="academic-history-content" class="academic-history-content"></div>
     </section>
 
   </div>

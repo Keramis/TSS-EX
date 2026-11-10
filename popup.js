@@ -29,6 +29,10 @@ let teaRequestsLoaded = false;
 let teaRequestsLoading = false;
 let teaRequestLoadSequence = 0;
 let teaDetailSequence = 0;
+let academicHistory = null;
+let academicHistoryLoaded = false;
+let academicHistoryLoading = false;
+let academicHistoryLoadSequence = 0;
 
 function sendRuntimeMessage(message, timeoutMs = 20000) {
   let timeoutId;
@@ -194,6 +198,266 @@ function renderTeaRequestDetails(details) {
   return body || '<p class="tea-detail-empty">No additional details are available for this request.</p>';
 }
 
+function academicHistoryErrorMessage(result) {
+  if (result?.error === 'no-auth') return 'Sign in to TSS to view your academic history.';
+  if (result?.error === 'auth-expired') return 'Your TSS session expired. Re-authenticate, then refresh academic history.';
+  if (result?.error === 'rate-limited') return 'Academic history requests are paused briefly after a failed response. Wait 30 seconds, then retry.';
+  if (result?.error === 'tss-context-unavailable') return 'Could not initialize the background TSS page. Refresh academic history to try again.';
+  if (result?.error === 'csrf-token') return 'TSS did not provide a request token for academic history. Try again after refreshing your TSS session.';
+  if (result?.error === 'http') return `TSS could not load academic history (HTTP ${result.status || 'error'}). Try again.`;
+  if (result?.error === 'parse') return 'TSS returned academic history in an unexpected format. Try again later.';
+  return 'Could not connect to TSS. Check your connection and try again.';
+}
+
+function academicHistoryValue(value) {
+  return value === null || value === undefined || String(value).trim() === '' ? '' : String(value);
+}
+
+function academicHistoryFacts(fields) {
+  const rows = fields.map(([label, value]) => [label, academicHistoryValue(value)]).filter(([, value]) => value);
+  if (!rows.length) return '<p class="academic-history-empty">No details available.</p>';
+  return `<dl class="academic-history-facts">${rows.map(([label, value]) => `
+    <div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}
+  </dl>`;
+}
+
+function academicHistoryDisclosure(title, content, count = null) {
+  const suffix = Number.isInteger(count) ? ` <span class="academic-history-count">${count}</span>` : '';
+  return `<details class="academic-history-disclosure">
+    <summary>${escapeHtml(title)}${suffix}</summary>
+    <div class="academic-history-disclosure-body">${content}</div>
+  </details>`;
+}
+
+function academicTermParts(item) {
+  const session = item.academicSession_Text || item.acSess_Text || item.acadSess_Text
+    || item.acSessOut_Text || item.academicSession || item.acSess || item.acadSess || item.acSessOut;
+  const year = item.academicYear_Text || item.acYear_Text || item.acadYear_Text
+    || item.academicYear || item.acYear || item.acadYear;
+  return { session: academicHistoryValue(session), year: academicHistoryValue(year) };
+}
+
+function academicHistoryTermOrder(item) {
+  const { session, year } = academicTermParts(item);
+  const yearNumber = Number(String(year).match(/\d{4}/)?.[0]) || 0;
+  const quarter = /fall/i.test(session) ? 1
+    : /winter/i.test(session) ? 2
+    : /spring/i.test(session) ? 3
+    : /summer/i.test(session) ? 4
+    : ({ '2': 1, '3': 2, '4': 3, '1': 4 }[String(session)] || 0);
+  return yearNumber * 10 + quarter;
+}
+
+function sortAcademicHistoryTerms(rows) {
+  return [...rows].sort((a, b) => academicHistoryTermOrder(b) - academicHistoryTermOrder(a));
+}
+
+function renderAcademicCourses(rows) {
+  const groups = new Map();
+  sortAcademicHistoryTerms(rows).forEach((course) => {
+    const { session, year } = academicTermParts(course);
+    const label = [session, year].filter(Boolean).join(' · ') || 'Term unavailable';
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(course);
+  });
+  if (!groups.size) return '<p class="academic-history-empty">No course history was returned.</p>';
+  return [...groups.entries()].map(([term, courses]) => `
+    <details class="academic-history-term" open>
+      <summary>${escapeHtml(term)} <span class="academic-history-count">${courses.length}</span></summary>
+      <div class="academic-history-course-list">${courses.map((course) => {
+        const courseName = [course.short, course.title].filter(Boolean).join(' · ') || 'Course details unavailable';
+        return `<article class="academic-history-course">
+          <h3>${escapeHtml(courseName)}</h3>
+          ${academicHistoryFacts([
+            ['Units', course.units],
+            ['Attempted credits', course.attemptedCredits],
+            ['Earned credits', course.earnedCredits],
+            ['Grade', course.gradeSymbol],
+            ['Grade value', course.gradeValue],
+            ['Grading option', course.gradingOption_Text || course.gradingOption],
+            ['Status', course.bookingStatus],
+            ['Status detail', course.bookingStatusState],
+            ['Academic level', course.acLvl_Text || course.acLvl],
+            ['Program type', course.programType],
+            ['Course dates', [course.begda, course.endda].filter(Boolean).join(' – ')],
+            ['Transfer credit', course.transferred],
+            ['Quality points', course.qualityPoints],
+          ])}
+        </article>`;
+      }).join('')}</div>
+    </details>`).join('');
+}
+
+function academicHistoryFlag(value) {
+  return ['1', 'true', 'x', 'yes'].includes(String(value ?? '').trim().toLowerCase());
+}
+
+function academicHistoryEventRows(events, checks) {
+  const checkByEvent = new Map(checks.map((check) => [String(check.eventID || ''), check]));
+  if (!events.length) return '<p class="academic-history-empty">No registered event records were returned.</p>';
+  const days = [
+    ['monday', 'Mon'], ['tuesday', 'Tue'], ['wednesday', 'Wed'], ['thursday', 'Thu'],
+    ['friday', 'Fri'], ['saturday', 'Sat'], ['sunday', 'Sun'],
+  ];
+  return `<div class="academic-history-record-list">${events.map((event) => {
+    const check = checkByEvent.get(String(event.eventID || ''));
+    const meetings = (Array.isArray(check?.schedule) ? check.schedule : []).map((meeting) => {
+      const meetingDays = days.filter(([field]) => academicHistoryFlag(meeting[field])).map(([, label]) => label).join(', ');
+      const time = [meeting.beginTime, meeting.endTime].filter(Boolean).join('–');
+      const place = [meeting.buildingText || meeting.building, meeting.roomNumber].filter(Boolean).join(' ');
+      return `<li>${academicHistoryFacts([
+        ['Meeting type', meeting.meetingType_Text || meeting.meetingType],
+        ['Days', meetingDays],
+        ['Time', time],
+        ['Location', place],
+        ['Modality', meeting.modality_Text || meeting.modality],
+        ['Instructor', meeting.instrName],
+      ])}</li>`;
+    }).join('');
+    const label = [event.modShort, event.modTitle, event.pkgShort, event.pkgTitle, event.eventShort, event.eventStext]
+      .filter(Boolean).join(' · ') || 'Registered event';
+    const term = academicTermParts(event);
+    const termLabel = [term.session, term.year].filter(Boolean).join(' · ');
+    return `<article class="academic-history-record">
+      <h3>${escapeHtml(label)}</h3>
+      ${academicHistoryFacts([
+        ['Term', termLabel],
+        ['Event', event.eventTitle || event.eventSubtitle],
+        ['Location', event.locationText],
+        ['Method', event.method_Text || event.method],
+        ['Delivery mode', event.deliveryMode_Text || event.deliveryMode],
+      ])}
+      ${meetings ? `<ul class="academic-history-meetings">${meetings}</ul>` : '<p class="academic-history-empty">No meeting schedule returned.</p>'}
+    </article>`;
+  }).join('')}</div>`;
+}
+
+function renderAcademicHistory(data) {
+  const body = document.getElementById('academic-history-content');
+  if (!body) return;
+  const rows = (name) => Array.isArray(data?.[name]) ? data[name] : [];
+  const student = rows('student')[0] || {};
+  const programTypes = rows('programTypes');
+  const courses = rows('courses');
+  const sessions = sortAcademicHistoryTerms(rows('sessionRegistrations'));
+  const events = rows('bookingEvents');
+  const checks = rows('bookingEventChecks');
+  const transfers = rows('transferSummaries');
+  const admissions = rows('admissions');
+  const degrees = rows('degrees');
+  const academicEvents = rows('academicEvents');
+  const profile = academicHistoryFacts([
+    ['College', student.collegeTitle || student.collegeId],
+    ['Major(s)', student.currMajors],
+    ['Minor(s)', student.currMinors],
+    ['Program', student.programType_Text || student.programType || programTypes[0]?.programType_Text || programTypes[0]?.programType],
+    ['Program effective from', programTypes[0]?.maxbegda || student.maxBegda],
+  ]);
+  const registrations = sessions.length
+    ? `<div class="academic-history-record-list">${sessions.map((item) => {
+      const term = academicTermParts(item);
+      return `<article class="academic-history-record"><h3>${escapeHtml([term.session, term.year].filter(Boolean).join(' · ') || 'Term unavailable')}</h3>
+        ${academicHistoryFacts([
+          ['Registration status', item.regStatus],
+          ['Standing', item.academicStandingText],
+          ['Honors', item.academicHonorsText],
+          ['Classification', item.classification_Text || item.classification],
+          ['Progress classification', item.progressClassificationText],
+          ['Registration begins', item.regBegda],
+          ['Registration ends', item.regEndda],
+        ])}</article>`;
+    }).join('')}</div>` : '<p class="academic-history-empty">No registration records were returned.</p>';
+  const transferContent = transfers.length
+    ? `<div class="academic-history-record-list">${transfers.map((item) => `<article class="academic-history-record">
+        <h3>${escapeHtml(item.eoTitle || item.externalOrg || item.eoShort || 'Transfer credit')}</h3>
+        ${academicHistoryFacts([['Organization', item.externalOrg], ['Issue date', item.issueDate], ['Total credits', item.totalCredits]])}
+      </article>`).join('')}</div>` : '<p class="academic-history-empty">No transfer summaries were returned.</p>';
+  const admissionContent = admissions.length
+    ? `<div class="academic-history-record-list">${admissions.map((item) => `<article class="academic-history-record">
+        <h3>${escapeHtml([item.admPeriod_Text || item.admPeriod, item.admYear_Text || item.admYear].filter(Boolean).join(' · ') || 'Admission')}</h3>
+        ${academicHistoryFacts([
+          ['Category', item.admCateg_Text || item.admCateg],
+          ['Status', item.applStatus_Text || item.applStatus],
+          ['Program', item.progType_Text || item.programShort || item.progType],
+          ['Registration type', item.regType_Text || item.regType],
+          ['School', item.scOtjid_Text || item.scOtjid],
+          ['Applicant decision', item.applicantDecision_Text || item.applicantDecision],
+          ['Applicant decision date', item.applicantDecisionDate],
+          ['Application decision', item.applicationDecision_Text || item.applicationDecision],
+          ['Application decision date', item.applicationDecisionDate],
+          ['Date received', item.dateOfReceipt],
+        ])}</article>`).join('')}</div>` : '<p class="academic-history-empty">No admission records were returned.</p>';
+  const degreeContent = degrees.length
+    ? `<p class="academic-history-empty">${degrees.length} degree record${degrees.length === 1 ? '' : 's'} returned.</p>`
+    : '<p class="academic-history-empty">No degree records were returned.</p>';
+  const academicEventsContent = academicEvents.length
+    ? `<div class="academic-history-record-list">${academicEvents.map((item) => `<article class="academic-history-record">
+        <h3>${escapeHtml(item.acadEventText || item.acadEvent || 'Academic event')}</h3>
+        ${academicHistoryFacts([
+          ['Program', item.programType_Text || item.programType],
+          ['Begins', item.begda],
+          ['Ends', item.endda],
+        ])}</article>`).join('')}</div>` : '<p class="academic-history-empty">No academic events were returned.</p>';
+
+  body.innerHTML = [
+    `<section class="academic-history-section"><h2>Current academic information</h2>${profile}</section>`,
+    `<section class="academic-history-section"><h2>Course history</h2>${renderAcademicCourses(courses)}</section>`,
+    academicHistoryDisclosure('Registration and standing', registrations, sessions.length),
+    academicHistoryDisclosure('Registered events and schedules', academicHistoryEventRows(events, checks), events.length),
+    academicHistoryDisclosure('Transfer credit', transferContent, transfers.length),
+    academicHistoryDisclosure('Admission', admissionContent, admissions.length),
+    academicHistoryDisclosure('Degrees', degreeContent, degrees.length),
+    academicHistoryDisclosure('Academic events', academicEventsContent, academicEvents.length),
+  ].join('');
+}
+
+async function loadAcademicHistory({ refresh = false } = {}) {
+  const status = document.getElementById('academic-history-status');
+  const refreshButton = document.getElementById('academic-history-refresh');
+  if (!status || academicHistoryLoading || (academicHistoryLoaded && !refresh)) return;
+  academicHistoryLoading = true;
+  const sequence = ++academicHistoryLoadSequence;
+  status.textContent = academicHistory ? 'Refreshing academic history…' : 'Loading academic history…';
+  if (refreshButton) refreshButton.disabled = true;
+  try {
+    const result = await sendRuntimeMessage({ type: 'getAcademicHistory' });
+    if (sequence !== academicHistoryLoadSequence) return;
+    if (result?.error) {
+      status.textContent = academicHistoryErrorMessage(result);
+      return;
+    }
+    if (!result?.history || typeof result.history !== 'object') {
+      status.textContent = academicHistoryErrorMessage({ error: 'parse' });
+      return;
+    }
+    academicHistory = result.history;
+    academicHistoryLoaded = true;
+    const courseCount = Array.isArray(academicHistory.courses) ? academicHistory.courses.length : 0;
+    status.textContent = `${courseCount} course records loaded.`;
+    renderAcademicHistory(academicHistory);
+  } catch {
+    if (sequence === academicHistoryLoadSequence) status.textContent = academicHistoryErrorMessage({ error: 'network' });
+  } finally {
+    if (sequence === academicHistoryLoadSequence) {
+      academicHistoryLoading = false;
+      if (refreshButton) refreshButton.disabled = false;
+    }
+  }
+}
+
+function clearAcademicHistory() {
+  academicHistoryLoadSequence++;
+  academicHistory = null;
+  academicHistoryLoaded = false;
+  academicHistoryLoading = false;
+  const status = document.getElementById('academic-history-status');
+  const content = document.getElementById('academic-history-content');
+  const refreshButton = document.getElementById('academic-history-refresh');
+  if (status) status.textContent = 'Select Academic History to load your records.';
+  if (content) content.replaceChildren();
+  if (refreshButton) refreshButton.disabled = false;
+}
+
 async function openTeaRequestDetails(requestId) {
   const dialog = document.getElementById('tea-detail-dialog');
   const title = document.getElementById('tea-detail-title');
@@ -237,13 +501,17 @@ async function openTeaRequestDetails(requestId) {
 }
 
 function bindAppTabs() {
-  const plannerTab = document.getElementById('tab-planner');
-  const teaTab = document.getElementById('tab-tea');
-  const plannerPanel = document.getElementById('planner-tab-panel');
-  const teaPanel = document.getElementById('tea-tab-panel');
-  if (!plannerTab || !teaTab || !plannerPanel || !teaPanel) return;
-  const tabs = [plannerTab, teaTab];
-  const panels = [plannerPanel, teaPanel];
+  const tabs = [
+    document.getElementById('tab-planner'),
+    document.getElementById('tab-tea'),
+    document.getElementById('tab-academic-history'),
+  ];
+  const panels = [
+    document.getElementById('planner-tab-panel'),
+    document.getElementById('tea-tab-panel'),
+    document.getElementById('academic-history-tab-panel'),
+  ];
+  if (tabs.some((tab) => !tab) || panels.some((panel) => !panel)) return;
   const activate = (index, focus = false) => {
     tabs.forEach((tab, tabIndex) => {
       const selected = tabIndex === index;
@@ -254,9 +522,10 @@ function bindAppTabs() {
     });
     if (focus) tabs[index].focus();
     if (index === 1 && !teaRequestsLoaded) loadTeaRequests({ reset: true });
+    if (index === 2 && !academicHistoryLoaded) loadAcademicHistory();
   };
   tabs.forEach((tab, index) => tab.addEventListener('click', () => activate(index)));
-  plannerTab.parentElement?.addEventListener('keydown', (event) => {
+  tabs[0].parentElement?.addEventListener('keydown', (event) => {
     const currentIndex = tabs.indexOf(document.activeElement);
     if (currentIndex < 0) return;
     let nextIndex = null;
@@ -269,6 +538,7 @@ function bindAppTabs() {
     activate(nextIndex, true);
   });
 
+  document.getElementById('academic-history-refresh')?.addEventListener('click', () => loadAcademicHistory({ refresh: true }));
   document.getElementById('tea-refresh')?.addEventListener('click', () => loadTeaRequests({ reset: true }));
   document.getElementById('tea-load-more')?.addEventListener('click', () => loadTeaRequests());
   document.getElementById('tea-request-list')?.addEventListener('click', (event) => {
@@ -2751,6 +3021,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.auth) {
       const accountChanged = changes.auth.oldValue?.cookie !== changes.auth.newValue?.cookie;
+      if (accountChanged) {
+        clearAcademicHistory();
+        if (changes.auth.newValue?.cookie
+            && document.getElementById('tab-academic-history')?.getAttribute('aria-selected') === 'true') {
+          loadAcademicHistory();
+        }
+      }
       checkAuth(accountChanged);
     } else if (area === 'session' && (changes.reauthFlow || changes.authFault)) {
       checkAuth();
