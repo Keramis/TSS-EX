@@ -1,6 +1,5 @@
 const DAYS = ['M', 'Tu', 'W', 'Th', 'F', 'Sa', 'Su'];
 const DEFAULT_TERM = { academicYear: '2026', academicPeriod: '3' };
-const LEGACY_DEFAULT_TERM = { academicYear: '2026', academicPeriod: '2' };
 const PERIOD_CODE = { '1': 'SU', '2': 'FA', '3': 'WI', '4': 'SP' };
 
 let planned = [];
@@ -627,12 +626,36 @@ async function loadPlanned() {
   }) : [];
 }
 
+function latestAvailableTerm(options) {
+  const years = (options?.years || []).map(({ value }) => String(value)).filter((value) => /^\d{4}$/.test(value));
+  const quarterOrder = { '2': 1, '3': 2, '4': 3, '1': 4 };
+  const periods = (options?.periods || []).map(({ value }) => String(Number(value)))
+    .filter((value) => quarterOrder[value]);
+  if (!years.length || !periods.length) return null;
+  years.sort((a, b) => Number(b) - Number(a));
+  periods.sort((a, b) => quarterOrder[b] - quarterOrder[a]);
+  return { academicYear: years[0], academicPeriod: periods[0] };
+}
+
 async function loadTerm() {
-  const { currentTerm: t } = await chrome.storage.local.get('currentTerm');
-  const staleDefault = String(t?.academicYear) === LEGACY_DEFAULT_TERM.academicYear
-    && String(t?.academicPeriod) === LEGACY_DEFAULT_TERM.academicPeriod;
-  currentTerm = !t || staleDefault ? DEFAULT_TERM : t;
-  if (!t || staleDefault) await chrome.storage.local.set({ currentTerm });
+  const { currentTerm: saved, plannerTermInitialized } = await chrome.storage.local.get(['currentTerm', 'plannerTermInitialized']);
+  if (saved && plannerTermInitialized) {
+    currentTerm = saved;
+    return currentTerm;
+  }
+  // Initialize old installations too: the retired DOM detector could save an
+  // unavailable quarter. Failed requests remain retryable after signing in.
+  currentTerm = saved || DEFAULT_TERM;
+  try {
+    const options = await sendRuntimeMessage({ type: 'getTermOptions' }, 30000);
+    const latest = options?.error ? null : latestAvailableTerm(options);
+    if (latest) {
+      currentTerm = latest;
+      await chrome.storage.local.set({ currentTerm, plannerTermInitialized: true });
+    }
+  } catch {
+    // Keep the existing term while offline; initialize on the next load/search.
+  }
   return currentTerm;
 }
 
@@ -698,7 +721,7 @@ async function openTermPicker() {
   }));
   periodSelect.replaceChildren(...response.periods.map(({ value, label }) => {
     const option = document.createElement('option');
-    option.value = String(value);
+    option.value = String(Number(value));
     option.textContent = String(label || value);
     return option;
   }));
@@ -706,7 +729,7 @@ async function openTermPicker() {
   const selectedYear = response.years.some(({ value }) => String(value) === String(currentTerm.academicYear))
     ? String(currentTerm.academicYear)
     : String(response.years[response.years.length - 1].value);
-  const selectedPeriod = response.periods.some(({ value }) => String(value) === String(currentTerm.academicPeriod))
+  const selectedPeriod = response.periods.some(({ value }) => String(Number(value)) === String(currentTerm.academicPeriod))
     ? String(currentTerm.academicPeriod)
     : String(response.periods[0].value);
   yearSelect.value = selectedYear;
@@ -730,7 +753,7 @@ function bindTermPicker() {
     const academicPeriod = document.getElementById('term-period').value;
     if (!/^\d{4}$/.test(academicYear) || !/^\d+$/.test(academicPeriod)) return;
     currentTerm = { academicYear, academicPeriod };
-    await chrome.storage.local.set({ currentTerm });
+    await chrome.storage.local.set({ currentTerm, plannerTermInitialized: true });
     renderCurrentTerm();
     dialog.close();
   });
