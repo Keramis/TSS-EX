@@ -8,6 +8,8 @@ UCSD_EZPLAN-extension.zip
 *.rest
 *_request.txt
 *_requests.txt
+*return*.txt
+filtered_requests.json
 *_har_writeup.md
 Outline_And_RE_Notes.md
 PERSONAL_UPDATES_PARSING.md
