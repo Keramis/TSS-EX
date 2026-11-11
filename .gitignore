@@ -1,2 +1,33 @@
 *.har
 UCSD_EZPLAN-extension.zip
+
+# Local request captures and private analysis
+*.har
+*.har.*
+*.http
+*.rest
+*_request.txt
+*_requests.txt
+*_har_writeup.md
+Outline_And_RE_Notes.md
+PERSONAL_UPDATES_PARSING.md
+PLAN.MD
+
+# Local credentials and private keys
+.env
+.env.*
+!.env.example
+!.env.sample
+credentials*.json
+credentials*.txt
+secrets*.json
+secrets*.txt
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Generated extension packages
+TSS-EX-extension.zip
