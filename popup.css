@@ -188,6 +188,8 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   z-index: 20;
 }
 .app-tabs {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -197,6 +199,9 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   background: var(--bg-subtle);
 }
 .app-tab {
+  position: relative;
+  z-index: 1;
+  transition: color 220ms ease;
   min-height: 30px;
   padding: 5px 13px;
   border: 1px solid transparent;
@@ -215,6 +220,33 @@ html:has(body.full-planner) { width: auto; min-width: 760px; }
   box-shadow: var(--shadow);
 }
 .app-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.app-tabs.has-tab-indicator::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--tab-width);
+  height: var(--tab-height);
+  transform: translate(var(--tab-x), var(--tab-y));
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+.app-tabs.tabs-ready::before {
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1), width 280ms cubic-bezier(0.22, 1, 0.36, 1), height 280ms ease;
+}
+.app-tabs.has-tab-indicator .app-tab[aria-selected="true"] {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-tabs.tabs-ready::before, .app-tab { transition: none; }
+}
+
 .planner-actions {
   display: flex;
   align-items: center;
@@ -1252,6 +1284,10 @@ body.full-planner .final-block-details { font-size: 13px; }
 }
 .section-picker-actions { gap: 8px; }
 .planned-card-body .js-export-planned { flex: 0 0 auto; }
+.planned-card-body .js-book,
+.planned-card-body .js-book-state { flex: 0 0 auto; }
+.planned-card-body .js-book:disabled { opacity: 0.65; cursor: wait; }
+.planned-card-body .js-book-state:disabled { opacity: 0.8; cursor: default; }
 
 /* ===== Requirements modal ===== */
 .req-modal { width: 500px; }
@@ -1464,3 +1500,23 @@ body.full-planner #open-planner { display: none; }
   .academic-history-content { padding-right: 12px; padding-left: 12px; }
   .academic-history-facts > div { grid-template-columns: minmax(90px, 0.7fr) minmax(0, 1.8fr); }
 }
+
+/* Section selection feedback shared by popup and full planner. */
+.planned-section-number { color: var(--muted); font-size: 0.85em; font-weight: 500; }
+.package-option.is-planned { border-color: color-mix(in srgb, var(--di-fill) 55%, var(--border)); background: color-mix(in srgb, var(--di-fill) 10%, var(--surface)); }
+.package-option.is-planned:hover { background: color-mix(in srgb, var(--di-fill) 16%, var(--surface)); }
+.package-option.is-planned.selected { border-color: var(--primary); box-shadow: inset 3px 0 var(--di-fill); }
+.section-planned-label { color: var(--di-text); font-size: 11px; font-weight: 700; }
+.section-loading { flex-basis: 100%; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; }
+.result-item[aria-busy="true"] { flex-wrap: wrap; cursor: progress; }
+.section-loading-track { display: block; width: 100px; height: 4px; overflow: hidden; border-radius: 999px; background: var(--bg-strong); }
+.section-loading-fill { display: block; width: 100%; height: 100%; background: var(--teal-text); transform: scaleX(0); transform-origin: left; transition: transform 100ms linear; }
+.section-loading.is-complete .section-loading-fill { transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1); }
+@media (prefers-reduced-motion: reduce) {
+  .section-loading-fill, .section-loading.is-complete .section-loading-fill { transition: none; }
+}
+
+.academic-history-group > summary { margin: 8px 0; color: var(--teal-text); font-size: 15px; font-weight: 700; cursor: pointer; }
+.academic-history-group > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 4px; }
+.academic-history-group-body { min-width: 0; }
+.academic-history-other { padding-top: 8px; border-top: 1px solid var(--divider); }

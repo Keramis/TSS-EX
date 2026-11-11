@@ -78,6 +78,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       status: response.status,
       ok: response.ok,
       type: response.type,
+      contentType: response.headers.get('content-type'),
       text,
       csrfToken: response.headers.get('x-csrf-token'),
     });

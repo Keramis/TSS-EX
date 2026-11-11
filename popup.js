@@ -14,6 +14,7 @@ let fullRefreshStarting = false;
 let observedRefreshId = null;
 let refreshStopRequested = false;
 const singleClassRefreshes = new Map();
+const activeClassBookings = new Set();
 let singleRefreshQueue = Promise.resolve();
 let personalRefreshPromise = null;
 let scheduleSyncActive = false;
@@ -29,6 +30,8 @@ let teaRequestsLoading = false;
 let teaRequestLoadSequence = 0;
 let teaDetailSequence = 0;
 let academicHistory = null;
+let academicHistoryDisclosureState = {};
+let academicHistoryDisclosureStateLoaded = false;
 let academicHistoryLoaded = false;
 let academicHistoryLoading = false;
 let academicHistoryLoadSequence = 0;
@@ -220,9 +223,26 @@ function academicHistoryFacts(fields) {
   </dl>`;
 }
 
+function academicHistoryDisclosureAttributes(key, defaultOpen = false) {
+  const open = Object.hasOwn(academicHistoryDisclosureState, key)
+    ? academicHistoryDisclosureState[key] : defaultOpen;
+  return `data-history-disclosure="${escapeHtml(key)}"${open ? ' open' : ''}`;
+}
+
+function bindAcademicHistoryDisclosures(body) {
+  body.querySelectorAll('details[data-history-disclosure]').forEach((details) => {
+    details.addEventListener('toggle', () => {
+      const key = details.dataset.historyDisclosure;
+      if (academicHistoryDisclosureState[key] === details.open) return;
+      academicHistoryDisclosureState[key] = details.open;
+      chrome.storage.local.set({ academicHistoryDisclosureState }).catch(() => undefined);
+    });
+  });
+}
+
 function academicHistoryDisclosure(title, content, count = null) {
   const suffix = Number.isInteger(count) ? ` <span class="academic-history-count">${count}</span>` : '';
-  return `<details class="academic-history-disclosure">
+  return `<details class="academic-history-disclosure" ${academicHistoryDisclosureAttributes(`record:${title}`)}>
     <summary>${escapeHtml(title)}${suffix}</summary>
     <div class="academic-history-disclosure-body">${content}</div>
   </details>`;
@@ -261,7 +281,7 @@ function renderAcademicCourses(rows) {
   });
   if (!groups.size) return '<p class="academic-history-empty">No course history was returned.</p>';
   return [...groups.entries()].map(([term, courses]) => `
-    <details class="academic-history-term" open>
+    <details class="academic-history-term" ${academicHistoryDisclosureAttributes(`term:${term}`)}>
       <summary>${escapeHtml(term)} <span class="academic-history-count">${courses.length}</span></summary>
       <div class="academic-history-course-list">${courses.map((course) => {
         const courseName = [course.short, course.title].filter(Boolean).join(' · ') || 'Course details unavailable';
@@ -400,14 +420,20 @@ function renderAcademicHistory(data) {
 
   body.innerHTML = [
     `<section class="academic-history-section"><h2>Current academic information</h2>${profile}</section>`,
-    `<section class="academic-history-section"><h2>Course history</h2>${renderAcademicCourses(courses)}</section>`,
+    `<details class="academic-history-section academic-history-group" ${academicHistoryDisclosureAttributes('group:courses', true)}>
+      <summary>Course history <span class="academic-history-count">${courses.length}</span></summary>
+      <div class="academic-history-group-body">${renderAcademicCourses(courses)}</div>
+    </details>`,
+    '<section class="academic-history-section academic-history-other"><h2>Other academics</h2>',
     academicHistoryDisclosure('Registration and standing', registrations, sessions.length),
     academicHistoryDisclosure('Registered events and schedules', academicHistoryEventRows(events, checks), events.length),
     academicHistoryDisclosure('Transfer credit', transferContent, transfers.length),
     academicHistoryDisclosure('Admission', admissionContent, admissions.length),
     academicHistoryDisclosure('Degrees', degreeContent, degrees.length),
     academicHistoryDisclosure('Academic events', academicEventsContent, academicEvents.length),
+    '</section>',
   ].join('');
+  bindAcademicHistoryDisclosures(body);
 }
 
 async function loadAcademicHistory({ refresh = false } = {}) {
@@ -419,6 +445,11 @@ async function loadAcademicHistory({ refresh = false } = {}) {
   status.textContent = academicHistory ? 'Refreshing academic history…' : 'Loading academic history…';
   if (refreshButton) refreshButton.disabled = true;
   try {
+    if (!academicHistoryDisclosureStateLoaded) {
+      const saved = await chrome.storage.local.get('academicHistoryDisclosureState').catch(() => ({}));
+      academicHistoryDisclosureState = saved.academicHistoryDisclosureState || {};
+      academicHistoryDisclosureStateLoaded = true;
+    }
     const result = await sendRuntimeMessage({ type: 'getAcademicHistory' });
     if (sequence !== academicHistoryLoadSequence) return;
     if (result?.error) {
@@ -511,7 +542,23 @@ function bindAppTabs() {
     document.getElementById('academic-history-tab-panel'),
   ];
   if (tabs.some((tab) => !tab) || panels.some((panel) => !panel)) return;
+  const tabBar = tabs[0].parentElement;
+  let activeIndex = Math.max(0, tabs.findIndex((tab) => tab.getAttribute('aria-selected') === 'true'));
+  const positionIndicator = () => {
+    const tab = tabs[activeIndex];
+    tabBar.style.setProperty('--tab-x', `${tab.offsetLeft}px`);
+    tabBar.style.setProperty('--tab-y', `${tab.offsetTop}px`);
+    tabBar.style.setProperty('--tab-width', `${tab.offsetWidth}px`);
+    tabBar.style.setProperty('--tab-height', `${tab.offsetHeight}px`);
+    tabBar.classList.add('has-tab-indicator');
+  };
+  positionIndicator();
+  requestAnimationFrame(() => tabBar.classList.add('tabs-ready'));
+  const tabResizeObserver = new ResizeObserver(positionIndicator);
+  [tabBar, ...tabs].forEach((element) => tabResizeObserver.observe(element));
+  document.fonts?.ready.then(positionIndicator);
   const activate = (index, focus = false) => {
+    activeIndex = index;
     tabs.forEach((tab, tabIndex) => {
       const selected = tabIndex === index;
       tab.setAttribute('aria-selected', String(selected));
@@ -519,6 +566,7 @@ function bindAppTabs() {
       panels[tabIndex].hidden = !selected;
       panels[tabIndex].classList.toggle('hidden', !selected);
     });
+    positionIndicator();
     if (focus) tabs[index].focus();
     if (index === 1 && !teaRequestsLoaded) loadTeaRequests({ reset: true });
     if (index === 2 && !academicHistoryLoaded) loadAcademicHistory();
@@ -1023,7 +1071,7 @@ function renderCalendar() {
       const isConflict = conflictBlockKeys.has(key);
       const lane = laneByBlock.get(b) || { lane: 0, laneCount: 1 };
       const block = document.createElement('div');
-      block.className = `block ${meetingTypeClass(b.type || 'LE')}${cls.registered ? ' registered' : ' not-booked'}${isConflict ? ' conflict' : ''}${lane.laneCount > 1 ? ' overlap-lane' : ''}`;
+      block.className = `block ${meetingTypeClass(b.type || 'LE')}${classHasRegistration(cls) ? ' registered' : ' not-booked'}${isConflict ? ' conflict' : ''}${lane.laneCount > 1 ? ' overlap-lane' : ''}`;
       block.style.top = `${top}px`;
       block.style.height = `${height}px`;
       block.style.left = `calc(${lane.lane * 100 / lane.laneCount}% + 2px)`;
@@ -1312,6 +1360,23 @@ function renderFinalsList() {
     </div>`).join('');
 }
 
+function plannedSectionNumber(cls) {
+  const name = [plannedSectionName(cls), cls._lastPkg?.displayID, cls.selectedPackageDisplayID].filter(Boolean).join(' ');
+  return name.match(/\bP-\d+-\d+\b/i)?.[0] || '';
+}
+
+function plannedSectionName(cls) {
+  return cls._lastPkg?.pkgText || '';
+}
+
+function sectionIsPlanned(course, pkg, term) {
+  return planned.some((cls) => String(cls.moduleID) === String(course.moduleID)
+    && String(cls.academicYear) === String(term.academicYear)
+    && Number(cls.academicPeriod) === Number(term.academicPeriod)
+    && ((pkg.otjid && String(cls.selectedPackageOtjid) === String(pkg.otjid))
+      || (pkg.objid && String(cls.eventPkgObjid) === String(pkg.objid))));
+}
+
 function renderPlannedList() {
   const list = document.getElementById('planned-list');
   const empty = document.getElementById('planned-empty');
@@ -1327,7 +1392,7 @@ function renderPlannedList() {
   }
   empty.classList.add('hidden');
   const { conflictBlockKeys, finalConflictClassIds } = detectConflicts(planned);
-  for (const cls of [...planned].sort((a, b) => Number(Boolean(b.registered)) - Number(Boolean(a.registered)))) {
+  for (const cls of [...planned].sort((a, b) => Number(classHasRegistration(b)) - Number(classHasRegistration(a)))) {
     const hasScheduleConflict = cls.scheduleBlocks.some(
       (b) => !b.isFinal && conflictBlockKeys.has(`${cls.id}|${b.day}|${b.start}|${b.end}`)
     );
@@ -1346,6 +1411,17 @@ function renderPlannedList() {
     const seatsCls = hasSeatData ? seatsClass(cls.seatsAvailable, cls.seatsTotal) : 'muted';
     const isRefreshing = singleClassRefreshes.has(cls.id);
     const refreshLabel = `${isRefreshing ? 'Refreshing' : 'Refresh'} ${cls.courseAbbr} class info`;
+    const isBooking = activeClassBookings.has(cls.id);
+    const bookingEvents = cls.bookingDetails?.events || [];
+    const registered = classHasRegistration(cls);
+    const registeredEventCount = bookingEvents.filter(eventHasRegistration).length;
+    const hasWaitlistRegistration = bookingEvents.some((event) => !event.booked && event.waitlistPosition > 0);
+    const hasPartialRegistration = registeredEventCount > 0 && registeredEventCount < bookingEvents.length;
+    const bookingButton = cls.eventPkgObjid
+      ? registered
+        ? `<button class="btn btn-small js-book-state" type="button" disabled>${hasPartialRegistration ? 'Partial registration' : hasWaitlistRegistration ? 'Waitlisted' : bookingEvents.length ? 'Booked' : 'Registered'}</button>`
+        : `<button class="btn btn-small btn-primary js-book" type="button" data-id="${escapeHtml(cls.id)}" ${isBooking ? 'disabled' : ''} title="${cls.bookingStatusUncertain ? 'TSS status was unclear. This click will check TSS before submitting another booking.' : 'Book this selected section'}">${isBooking ? 'Booking…' : cls.bookingStatusUncertain ? 'Retry booking' : 'Book'}</button>`
+      : '';
 
     let conflictNote = '';
     if (hasFinalConflict) {
@@ -1357,8 +1433,8 @@ function renderPlannedList() {
     card.innerHTML = `
       <div class="planned-card-head">
         <div class="planned-card-title">
-          <span class="planned-card-abbr">${escapeHtml(cls.courseAbbr)}</span>
-          ${cls.registered ? '<span class="planned-registered-star" title="Registered in your UCSD schedule" aria-label="Registered in your UCSD schedule">★</span>' : ''}
+          <span class="planned-card-abbr">${escapeHtml(cls.courseAbbr)}${plannedSectionNumber(cls) ? ` <span class="planned-section-number">(${escapeHtml(plannedSectionNumber(cls))})</span>` : ''}</span>
+          ${registered ? '<span class="planned-registered-star" title="Registered in your UCSD schedule" aria-label="Registered in your UCSD schedule">★</span>' : ''}
           <span class="planned-card-name">${escapeHtml(cls.courseTitle)}</span>
         </div>
         <div class="planned-card-actions">
@@ -1389,6 +1465,7 @@ function renderPlannedList() {
           <span class="planned-info-label">Credits:</span>
           <span>${escapeHtml(cls.credits || '—')}</span>
         </div>
+        ${bookingButton}
         <button class="btn btn-small js-export-planned" type="button" data-id="${escapeHtml(cls.id)}">Export JSON</button>
         ${cls.unavailable ? '<div class="conflict-note conflict-schedule">Selected section is no longer listed by TSS</div>' : ''}
         ${conflictNote}
@@ -1430,6 +1507,9 @@ function renderPlannedList() {
   });
   list.querySelectorAll('.js-refresh-class').forEach((btn) => {
     btn.addEventListener('click', (e) => refreshClassInfo(e.currentTarget.dataset.id));
+  });
+  list.querySelectorAll('.js-book').forEach((btn) => {
+    btn.addEventListener('click', (e) => bookPlannedClass(e.currentTarget.dataset.id));
   });
   list.querySelectorAll('.js-details').forEach((btn) => {
     btn.addEventListener('click', (e) => {
@@ -1524,6 +1604,8 @@ function normalizeScheduleEvent(row) {
     meetingType: name?.meetingType || '',
     section: name?.section || '',
     teachingMethod: row.TeachingMethod || '',
+    booked: row.Booked === true,
+    waitlistPosition: Number(row.WaitlistPosition) || 0,
     isHoliday,
     isFinal: !isHoliday && startMinutes != null && endMinutes != null && endMinutes - startMinutes >= 150,
     dateMs,
@@ -1577,10 +1659,10 @@ function normalizeBooking(events, sectionRows = []) {
   return (events || []).map((event) => enrichBookingRooms({
     eventId: event.EventId,
     method: event.MethodText || event.Method || 'Class',
-    booked: Boolean(event.Booked),
+    booked: event.Booked === true,
     waitlistPosition: Number(event.WaitlistPosition) || 0,
-    waitlistBooking: Boolean(event.WaitlistBooking),
-    registrationState: event.Booked ? 'Booked' : event.WaitlistBooking ? 'On waitlist' : event.SelectBtnEnable ? 'Registration action available' : event.Disabled ? 'Unavailable' : 'Not currently selectable',
+    waitlistBooking: event.WaitlistBooking === true,
+    registrationState: event.Booked === true ? 'Booked' : Number(event.WaitlistPosition) > 0 ? 'On waitlist' : event.SelectBtnEnable ? 'Registration action available' : event.Disabled ? 'Unavailable' : 'Not currently selectable',
     registrationBegin: bookingDate(event.RegistrationBeginDate),
     registrationEnd: bookingDate(event.RegistrationEndDate),
     room: event.RoomShort || event.RoomStext || '',
@@ -1597,7 +1679,106 @@ function normalizeBooking(events, sectionRows = []) {
 }
 
 function bookingEventsContainRegistration(events) {
-  return (events || []).some((event) => Boolean(event.Booked || event.WaitlistBooking));
+  return (events || []).some((event) => event.Booked === true || Number(event.WaitlistPosition) > 0);
+}
+
+function eventHasRegistration(event) {
+  return event.booked === true || event.waitlistPosition > 0;
+}
+
+function classHasRegistration(cls) {
+  const events = cls.bookingDetails?.events;
+  return events?.length ? events.some(eventHasRegistration) : cls.registered === true;
+}
+
+function bookingResultMessage(result) {
+  if (result?.message) return result.message;
+  if (result?.error === 'no-auth') return 'Sign in to TSS, then try booking again.';
+  if (result?.error === 'auth-expired') return 'Your TSS session expired. Re-authenticate, then try again.';
+  if (result?.error === 'http') return `TSS returned HTTP ${result.status || 'error'} during the booking check. You can retry now.`;
+  if (result?.error === 'network') return 'Could not reach TSS. You can retry now.';
+  if (result?.error === 'invalid-request') return 'The selected class details are invalid. Refresh class info and try again.';
+  if (result?.error === 'not-bookable') return 'TSS reports this section is not currently bookable.';
+  if (result?.error === 'already-registered') return 'TSS already shows this class as booked. No new booking request was sent.';
+  if (result?.error === 'partial-registration') return 'TSS shows only some components as registered. Refresh class info before taking another action.';
+  if (result?.error === 'booking-data-incomplete') return 'TSS did not return all booking fields. Refresh class info and try again.';
+  if (result?.error === 'csrf-unavailable') return 'TSS did not provide a current security token. Refresh TSS and try again.';
+  if (result?.error === 'save-failed') return 'TSS did not confirm the save. Check the current booking status before trying again.';
+  if (result?.error === 'booking-unconfirmed') return 'TSS did not confirm the booking. Check the current booking status before trying again.';
+  if (result?.error === 'registration-check') return 'TSS did not approve this booking.';
+  if (result?.error === 'parse') return 'TSS returned booking data in an unexpected format. Refresh class info and try again.';
+  if (result?.error === 'storage') return 'The booking result could not be saved in the extension. Refresh class info before trying again.';
+  return 'Could not complete the booking. Check TSS status, then try again.';
+}
+
+async function bookPlannedClass(classId) {
+  if (activeClassBookings.has(classId)) return;
+  const cls = planned.find((item) => item.id === classId);
+  if (!cls?.eventPkgObjid || classHasRegistration(cls)) return;
+
+  activeClassBookings.add(classId);
+  showRefreshStatus('Checking TSS and submitting the booking request...');
+  renderAll();
+  let result;
+  let acknowledgedWarnings = '';
+  const refreshId = `book-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    while (true) {
+      result = await sendRuntimeMessage({
+        type: 'bookClass',
+        moduleID: cls.moduleID,
+        eventPkgObjid: cls.eventPkgObjid,
+        term: termForClass(cls),
+        acknowledgedWarnings,
+        refreshId,
+      }, 120000);
+      if (!result?.needsConfirmation) break;
+      const warnings = String(result.warnings || 'TSS returned a registration warning.');
+      showRefreshStatus(`TSS returned a booking warning: ${warnings}`);
+      if (!window.confirm(`TSS returned this registration warning:\n\n${warnings}\n\nContinue with the booking?`)) {
+        result = { events: result.events, message: `No booking was submitted. TSS warning: ${warnings}` };
+        break;
+      }
+      acknowledgedWarnings = warnings;
+    }
+  } catch (error) {
+    result = { error: 'network', statusUncertain: true, message: error.message || 'TSS did not confirm the booking request.' };
+  }
+
+  try {
+    if (Array.isArray(result?.events)) {
+      await updateStoredClass(classId, (current) => ({
+        ...current,
+        bookingFetchedAt: Date.now(),
+        bookingError: result.error ? bookingResultMessage(result) : null,
+        bookingDetails: { events: normalizeBooking(result.events, current._lastPkg?.raw || []), fetchedAt: Date.now() },
+        registered: bookingEventsContainRegistration(result.events),
+        bookingStatusUncertain: Boolean(result.statusUncertain),
+      }));
+    } else if (result?.statusUncertain) {
+      await updateStoredClass(classId, (current) => ({
+        ...current,
+        bookingError: bookingResultMessage(result),
+        bookingStatusUncertain: true,
+      }));
+    }
+  } catch {
+    result = { error: 'storage', statusUncertain: true };
+  }
+
+  let statusMessage;
+  if (result?.booked) {
+    statusMessage = result.recoveredAfterSaveError
+      ? 'Booked. TSS confirms the current registration status.'
+      : 'Booked successfully.';
+  } else if (result?.waitlisted) {
+    statusMessage = 'Added to the waitlist.';
+  } else {
+    statusMessage = bookingResultMessage(result);
+  }
+  showRefreshStatus(statusMessage, Boolean(result?.error), null, true);
+  activeClassBookings.delete(classId);
+  renderAll();
 }
 
 function updateStoredClass(id, updater) {
@@ -1683,7 +1864,7 @@ function scheduleClassGroups(events) {
   return [...groups.values()];
 }
 
-function registeredClassRecord(group, pkg, existing, now, sectionError = null) {
+function registeredClassRecord(group, pkg, existing, now, sectionError, bookingEvents) {
   const events = group.events;
   const sample = events.find((event) => event.courseAbbr) || events[0];
   const eventIds = [...new Set(events.map((event) => event.eventId).filter(Boolean))];
@@ -1721,9 +1902,11 @@ function registeredClassRecord(group, pkg, existing, now, sectionError = null) {
     registeredFetchedAt: now,
     sectionFetchedAt: pkg ? now : existing?.sectionFetchedAt || null,
     sectionError: pkg ? null : sectionError || existing?.sectionError || null,
-    bookingDetails: keepsPackage ? existing?.bookingDetails || null : null,
-    bookingFetchedAt: keepsPackage ? existing?.bookingFetchedAt || null : null,
-    bookingError: keepsPackage ? existing?.bookingError || null : null,
+    bookingDetails: bookingEvents ? { events: normalizeBooking(bookingEvents, pkg.raw), fetchedAt: now }
+      : keepsPackage ? existing?.bookingDetails || null : null,
+    bookingFetchedAt: bookingEvents ? now : keepsPackage ? existing?.bookingFetchedAt || null : null,
+    bookingError: bookingEvents ? null : keepsPackage ? existing?.bookingError || null : null,
+    bookingStatusUncertain: !bookingEvents && keepsPackage && Boolean(existing?.bookingStatusUncertain),
     availablePackages: pkg ? [] : existing?.availablePackages || [],
     unavailable: false,
     addedAt: existing?.addedAt || now,
@@ -1813,24 +1996,43 @@ async function syncSchedule() {
       const sectionError = sectionResult?.error
         ? [sectionResult.error, sectionResult.message].filter(Boolean).join(': ')
         : pkg ? null : 'No section package matched the registered timetable events';
-      syncResults.push({ group, pkg, sectionError });
+      let bookingEvents = null;
+      if (pkg?.objid) {
+        const bookingResult = await sendRuntimeMessage({
+          type: 'getBookingDetails', moduleID: group.moduleID, eventPkgObjid: pkg.objid, term: group.term, refreshId,
+        }).catch(() => null);
+        if (['no-auth', 'auth-expired'].includes(bookingResult?.error)) authFailed = true;
+        if (bookingResult?.events?.length && !bookingResult.error) bookingEvents = bookingResult.events;
+      }
+      syncResults.push({ group, pkg, sectionError, bookingEvents });
     }
     const { plannedClasses } = await chrome.storage.local.get('plannedClasses');
     const next = (Array.isArray(plannedClasses) ? plannedClasses : []).map((cls) => ({ ...cls, registered: false }));
     for (const result of syncResults) {
-      const { group, pkg, sectionError } = result;
-      const packageIds = packageEventIds(pkg);
+      const { group, pkg, sectionError, bookingEvents } = result;
       const moduleMatches = next.filter((cls) => String(cls.moduleID) === group.moduleID);
       const matching = pkg ? moduleMatches.filter((cls) => String(cls.academicYear) === String(group.term.academicYear)
         && String(cls.academicPeriod) === String(group.term.academicPeriod)) : moduleMatches;
-      let existing = matching.find((cls) => pkg && cls.selectedPackageOtjid === pkg.otjid);
-      const expectedIds = packageIds.size ? packageIds : new Set(group.events.map((event) => event.eventId).filter(Boolean));
-      if (!existing && expectedIds.size) {
-        existing = matching.find((cls) => [...packageEventIds(cls._lastPkg)].some((id) => expectedIds.has(id))
-          || (cls.syncedEventIds || []).some((id) => expectedIds.has(normalizeEventId(id))));
+      const existing = pkg
+        ? matching.find((cls) => (pkg.objid && cls.eventPkgObjid === pkg.objid)
+          || (pkg.otjid && cls.selectedPackageOtjid === pkg.otjid))
+        : matching.find((cls) => cls.scheduleOnly && (cls.syncedEventIds || [])
+          .some((id) => group.events.some((event) => event.eventId === normalizeEventId(id))));
+      const registered = bookingEvents ? bookingEventsContainRegistration(bookingEvents)
+        : !pkg && group.events.some(eventHasRegistration);
+      if (!registered) {
+        if (existing && bookingEvents) {
+          Object.assign(existing, {
+            bookingDetails: { events: normalizeBooking(bookingEvents, pkg.raw), fetchedAt: now },
+            bookingFetchedAt: now,
+            bookingError: null,
+            bookingStatusUncertain: false,
+            registeredFetchedAt: now,
+          });
+        }
+        continue;
       }
-      if (!existing && matching.length === 1) existing = matching[0];
-      const record = registeredClassRecord(group, pkg, existing, now, sectionError);
+      const record = registeredClassRecord(group, pkg, existing, now, sectionError, bookingEvents);
       if (existing) {
         const index = next.findIndex((cls) => cls.id === existing.id);
         if (index >= 0) next[index] = record;
@@ -1842,7 +2044,7 @@ async function syncSchedule() {
     planned = next;
     renderAll();
     await chrome.runtime.sendMessage({ type: 'finishRefresh', refreshId }).catch(() => undefined);
-    const registeredCount = groups.length;
+    const registeredCount = next.filter(classHasRegistration).length;
     showRefreshStatus(registeredCount
       ? `Schedule synced: ${registeredCount} registered ${registeredCount === 1 ? 'class' : 'classes'} marked with a star.`
       : 'Schedule synced. No registered classes were returned.', false, 100, true);
@@ -1873,14 +2075,16 @@ function bookingDetailHtml(cls) {
   const sectionRows = cls._lastPkg?.raw || [];
   return info.events.map((cachedEvent) => {
     const event = enrichBookingRooms(cachedEvent, sectionRows);
+    const registrationState = event.booked ? 'Booked' : event.waitlistPosition > 0 ? 'On waitlist'
+      : event.registrationState === 'On waitlist' ? 'Not registered' : event.registrationState || 'Unavailable';
     return `
     <section class="detail-event">
       <h4>${escapeHtml(event.method || 'Booking option')}</h4>
       <div class="detail-grid">
         <span>Booked</span><strong>${event.booked ? 'Yes' : 'No'}</strong>
-        <span>Your waitlist position</span><strong>${escapeHtml(event.waitlistPosition > 0 ? event.waitlistPosition : event.waitlistBooking ? 'Position unavailable' : 'Not waitlisted')}</strong>
-        <span>Waitlist booking</span><strong>${event.waitlistBooking ? 'Yes' : 'No'}</strong>
-        <span>Registration state</span><strong>${escapeHtml(event.registrationState || 'Unavailable')}</strong>
+        <span>Your waitlist position</span><strong>${escapeHtml(event.waitlistPosition > 0 ? event.waitlistPosition : 'Not waitlisted')}</strong>
+        <span>Waitlist option</span><strong>${event.waitlistBooking ? 'Yes' : 'No'}</strong>
+        <span>Registration state</span><strong>${escapeHtml(registrationState)}</strong>
         <span>Room</span><strong>${escapeHtml(event.room || 'Unavailable')}</strong>
         <span>Registration window</span><strong>${escapeHtml([event.registrationBegin, event.registrationEnd].filter(Boolean).join(' – ') || 'Unavailable')}</strong>
       </div>
@@ -1895,9 +2099,9 @@ function renderClassDetailsBody(body, classId) {
   const current = planned.find((item) => item.id === classId);
   if (!current) return;
   const schedule = detailScheduleHtml(current.scheduleBlocks || []);
-  const selectedSectionLabel = current.selectedPackageOtjid ? `Selected section ${escapeHtml(current.selectedPackageOtjid)}` : 'Registered schedule';
+  const selectedSectionLabel = plannedSectionNumber(current) ? `Selected section ${escapeHtml(plannedSectionNumber(current))}` : 'Registered schedule';
   body.innerHTML = `<section class="detail-event"><h3>${selectedSectionLabel}</h3>
-    <div class="detail-grid"><span>Open seats / capacity</span><strong>${escapeHtml(current.seatsAvailable)}/${escapeHtml(current.seatsTotal)}</strong>
+    <div class="detail-grid">${plannedSectionName(current) ? `<span>Section name</span><strong>${escapeHtml(plannedSectionName(current))}</strong>` : ''}<span>Open seats / capacity</span><strong>${escapeHtml(current.seatsAvailable)}/${escapeHtml(current.seatsTotal)}</strong>
     <span>Total waitlist</span><strong>${escapeHtml(current.waitlistTotal ?? '—')}</strong>
     <span>Professor</span><strong>${escapeHtml(current.instructor || 'Staff')}</strong>
     <span>Section status</span><strong>${escapeHtml(current.status || '—')}</strong>
@@ -2135,6 +2339,7 @@ async function refreshClassInfo(classId) {
         next.bookingError = null;
         next.bookingDetails = { events: normalizeBooking(bookingResult.events, sectionRows), fetchedAt: now };
         next.registered = bookingEventsContainRegistration(bookingResult.events);
+        next.bookingStatusUncertain = false;
         next.registeredFetchedAt = now;
       } else {
         next.bookingError = [bookingResult?.error, bookingResult?.message].filter(Boolean).join(': ') || 'Booking refresh failed';
@@ -2285,6 +2490,7 @@ async function refreshAllClasses() {
         next.bookingError = null;
         next.bookingDetails = { events: normalizeBooking(bookingResult.events, sectionRows), fetchedAt: now };
         next.registered = bookingEventsContainRegistration(bookingResult.events);
+        next.bookingStatusUncertain = false;
         next.registeredFetchedAt = now;
       } else {
         next.bookingError = [bookingResult.error, bookingResult.message].filter(Boolean).join(': ');
@@ -2416,7 +2622,7 @@ function renderSearchResults(results) {
           <span class="chip">${escapeHtml(r.credits)} cr</span>
           <span class="chip chip-dept">${escapeHtml(r.departmentAbbr)}</span>
         </div>`;
-      li.addEventListener('click', () => onResultClick(r));
+      li.addEventListener('click', () => onResultClick(r, li));
       list.appendChild(li);
     }
   }
@@ -2610,26 +2816,67 @@ async function saveSearchResultsAsJson() {
   }
 }
 
-async function onResultClick(course) {
-  const term = currentTerm || (await loadTerm());
-  let resp;
+let sectionPickerRequestSequence = 0;
+
+function sectionLoadingPercent(elapsedMs) {
+  const seconds = Math.max(0, elapsedMs) / 1000;
+  if (seconds <= 7) return seconds * 10;
+  // Continue from 70% with a logarithmic ease, leaving room for completion.
+  const tail = Math.log1p((seconds - 7) / 2.6);
+  return 70 + 26 * tail / (1 + tail);
+}
+
+async function onResultClick(course, resultItem) {
+  if (resultItem?.dataset.loading === 'true') return;
+  const request = ++sectionPickerRequestSequence;
+  const indicator = document.createElement('div');
+  indicator.className = 'section-loading';
+  indicator.setAttribute('role', 'status');
+  indicator.innerHTML = '<span>Loading sections from TSS...</span><span class="section-loading-track" role="progressbar" aria-label="Estimated section loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="section-loading-fill"></span></span>';
+  const track = indicator.querySelector('.section-loading-track');
+  const fill = indicator.querySelector('.section-loading-fill');
+  const startedAt = performance.now();
+  const timer = setInterval(() => {
+    const percent = sectionLoadingPercent(performance.now() - startedAt);
+    fill.style.transform = `scaleX(${percent / 100})`;
+    track.setAttribute('aria-valuenow', String(Math.round(percent)));
+  }, 80);
+  if (resultItem) {
+    resultItem.dataset.loading = 'true';
+    resultItem.setAttribute('aria-busy', 'true');
+    resultItem.appendChild(indicator);
+  }
   try {
-    resp = await chrome.runtime.sendMessage({ type: 'getSections', moduleID: course.moduleID, term });
-  } catch (e) {
-    showAuthBanner('error', e.message);
-    return;
+    const term = currentTerm || (await loadTerm());
+    const resp = await sendRuntimeMessage({ type: 'getSections', moduleID: course.moduleID, term }, 30000);
+    if (request !== sectionPickerRequestSequence || (resultItem && !resultItem.isConnected)) return;
+    if (resp?.error === 'no-auth' || resp?.error === 'auth-expired') {
+      showAuthBanner('expired');
+      return;
+    }
+    if (!resp || resp.error) {
+      showAuthBanner('error', `${resp?.error || 'No response from TSS'}${resp?.status ? ` (${resp.status})` : ''}`);
+      return;
+    }
+    clearInterval(timer);
+    indicator.classList.add('is-complete');
+    fill.style.transform = 'scaleX(1)';
+    track.setAttribute('aria-valuenow', '100');
+    indicator.querySelector('span').textContent = 'Sections loaded';
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    if (request !== sectionPickerRequestSequence || (resultItem && !resultItem.isConnected)) return;
+    hideAuthBanner();
+    openSectionPicker(course, groupSections(resp.sections || []), term);
+  } catch (error) {
+    if (request === sectionPickerRequestSequence) showAuthBanner('error', error.message);
+  } finally {
+    clearInterval(timer);
+    indicator.remove();
+    if (resultItem) {
+      delete resultItem.dataset.loading;
+      resultItem.removeAttribute('aria-busy');
+    }
   }
-  if (resp.error === 'no-auth' || resp.error === 'auth-expired') {
-    showAuthBanner('expired');
-    return;
-  }
-  if (resp.error) {
-    showAuthBanner('error', `${resp.error}${resp.status ? ` (${resp.status})` : ''}`);
-    return;
-  }
-  hideAuthBanner();
-  const packages = groupSections(resp.sections || []);
-  openSectionPicker(course, packages, term);
 }
 
 // ---------- Requirements ----------
@@ -2875,11 +3122,12 @@ function openSectionPicker(course, packages, term, replaceClassId = null) {
         .map((b) => `<span>${escapeHtml(b.isFinal ? `${finalDateLabel(b)} ${finalTimeLabel(b)}` : `${b.day} ${b.start}-${b.end}`)} — ${escapeHtml(b.location)} (${escapeHtml(b.type)})</span>`)
         .join('');
       const seatsCls = seatsClass(pkg.seatsAvailable, pkg.seatsTotal);
+      const isPlanned = sectionIsPlanned(course, pkg, term);
       return `
-        <div class="package-option" data-idx="${i}">
+        <div class="package-option${isPlanned ? ' is-planned' : ''}" data-idx="${i}">
           <div class="package-head">
             <span class="package-id">${escapeHtml(pkg.displayID || pkg.otjid)} — ${escapeHtml(pkg.pkgText)}</span>
-            <div class="package-methods">${methodTags}</div>
+            <div class="package-methods">${isPlanned ? '<span class="section-planned-label">Planned</span>' : ''}${methodTags}</div>
           </div>
           <div class="package-detail">
             ${detailLines}

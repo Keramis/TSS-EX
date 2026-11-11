@@ -4,7 +4,7 @@
 const MODULE_BASE =
   'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd/sap/yucsd_con_module_servicedef/0001';
 const TERM_VALUE_HELP_BASE = 'https://tss.ucsd.edu/sap/opu/odata4/sap/yucsd_con_module_sb/srvd_f4';
-const BOOKING_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV';
+const BOOKING_SERVICE_PATH = '/sap/opu/odata/ITUS/PR_MY_MODULES_V2_SRV';
 const PERSONAL_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/BC_OVP_PERSONAL_DETAILS_SRV';
 const TIMETABLE_BASE = 'https://tss.ucsd.edu/sap/opu/odata/ited/EVENT_TIMETABLE_SRV';
 const TEA_BASE = 'https://tss.ucsd.edu/sap/opu/odata/sap/YTEA_REQUEST_SB_V2';
@@ -53,6 +53,8 @@ const SECTION_SELECT =
   'AcPeriod,AcYear,EventAbbr,EventID,EventPkgDisable,EventPkgDisplayID,EventPkgLimit,EventPkgNumOnWaitl,EventPkgObjid,EventPkgOtjid,EventPkgSeatsAvailable,EventPkgSemanticColorCapacity,EventPkgStatusText,EventPkgText,InstructorEmail,InstructorName,ModuleID,Sched,Status,StatusSemantic,TeachingMethod,TeachingMethod_Text,locationText';
 let bookingRequestQueue = Promise.resolve();
 let lastBookingRequestAt = 0;
+let cachedBookingHeader = null;
+let cachedBookingCsrf = null;
 let authCaptureQueue = Promise.resolve();
 let sessionVerificationPromise = null;
 let csrfTokenFetchPromise = null;
@@ -91,7 +93,7 @@ function captureAuthHeaders(headers) {
   }).catch(() => undefined);
 }
 
-function createRefreshRequest(refreshId) {
+function createRefreshRequest(refreshId, timeoutMs = 45000) {
   if (!refreshId) return { signal: undefined, result: () => 'network', finish: () => {} };
   const controller = new AbortController();
   const requests = refreshRequestControllers.get(refreshId) || new Set();
@@ -104,7 +106,7 @@ function createRefreshRequest(refreshId) {
   const timeoutId = setTimeout(() => {
     controller.timedOut = true;
     controller.abort();
-  }, 45000);
+  }, timeoutMs);
   return {
     signal: controller.signal,
     result: () => controller.userCancelled ? 'cancelled' : controller.timedOut ? 'timeout' : 'network',
@@ -1538,10 +1540,6 @@ async function getSections(moduleID, term, refreshId) {
 
 // ----- API: get booking state and dated event schedules -----
 async function fetchBookingDetails(moduleID, eventPkgObjid, term, refreshRequest) {
-  if (refreshRequest.signal?.aborted) return { error: refreshRequest.result() };
-  const auth = await getAuth();
-  if (!authPresent(auth)) return { error: 'no-auth' };
-
   const year = String(term?.academicYear || '');
   const period = String(term?.academicPeriod || '');
   const packageID = String(eventPkgObjid || '');
@@ -1549,57 +1547,336 @@ async function fetchBookingDetails(moduleID, eventPkgObjid, term, refreshRequest
     return { error: 'invalid-request' };
   }
 
-  const url = `${BOOKING_BASE}/ModuleHeaderSet(` +
-    `SmObjid='${moduleID}',SmOtype='SM',ScObjid='00000000',` +
-    `ModregId=guid'00000000-0000-0000-0000-000000000000',` +
-    `EventPackageId='${packageID}',AcademicYear='${year}',AcademicSession='${period}')` +
-    `/Event?sap-client=500&$expand=BookingCheckLog%2CRequest%2CEventSchedule%2CCreditOptions`;
+  const slotError = await waitForBookingRequestSlot(refreshRequest);
+  if (slotError) return slotError;
+
+  const result = await fetchBookingJson(
+    bookingEventsPath(moduleID, packageID, { academicYear: year, academicPeriod: period }), refreshRequest,
+  );
+  if (result.error) return result;
+  if (!Array.isArray(result.data?.d?.results)) return { error: 'parse', message: 'TSS response did not contain booking details' };
+  return { events: result.data.d.results };
+}
+
+function getBookingDetails(moduleID, eventPkgObjid, term, refreshId) {
+  const refreshRequest = createRefreshRequest(refreshId);
+  const request = bookingRequestQueue.then(() => fetchBookingDetails(moduleID, eventPkgObjid, term, refreshRequest));
+  bookingRequestQueue = request.catch(() => undefined);
+  return request.finally(refreshRequest.finish);
+}
+
+async function waitForBookingRequestSlot(refreshRequest) {
+  if (refreshRequest.signal?.aborted) return { error: refreshRequest.result() };
+  const pause = Math.max(0, 1200 - (Date.now() - lastBookingRequestAt));
+  if (pause) await new Promise((resolve) => setTimeout(resolve, pause));
+  if (refreshRequest.signal?.aborted) return { error: refreshRequest.result() };
+  lastBookingRequestAt = Date.now();
+  return null;
+}
+
+async function fetchBookingJson(path, refreshRequest, { method = 'GET', csrfToken, body, expectedCookie } = {}) {
+  if (refreshRequest.signal?.aborted) return { error: refreshRequest.result() };
+  const auth = await getAuth();
+  if (!authPresent(auth)) return { error: 'no-auth' };
+  if (expectedCookie && auth.cookie !== expectedCookie) return { error: 'auth-expired' };
 
   try {
-    const resp = await fetch(url, {
+    const resp = await fetch(`https://tss.ucsd.edu${path}`, {
+      method,
       headers: {
         Accept: 'application/json',
         'Accept-Language': 'en',
+        DataServiceVersion: '2.0',
+        MaxDataServiceVersion: '2.0',
         ...optionalAuthHeaders(auth),
         'x-requested-with': 'XMLHttpRequest',
+        ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
+      body,
       credentials: 'include',
       redirect: 'manual',
       signal: refreshRequest.signal,
     });
-    if (isAuthResponse(resp)) {
-      return { error: 'auth-expired', status: resp.status };
-    }
-    if (!resp.ok) return { error: 'http', status: resp.status };
-
-    const text = (await resp.text()).replace(/^\uFEFF/, '').trim();
-    let data;
-    try {
-      data = parseTssJson(text);
-    } catch (error) {
+    if (resp.status !== 403 && isAuthResponse(resp)) return { error: 'auth-expired', status: resp.status };
+    if (!resp.ok) {
       return {
-        error: refreshRequest.signal?.aborted ? refreshRequest.result() : 'parse',
-        message: refreshRequest.signal?.aborted ? undefined : `${error.message}; ${resp.headers.get('content-type') || 'unknown content type'}`,
+        error: 'http',
+        status: resp.status,
+        ...(resp.status === 403 && /^required$/i.test(resp.headers.get('x-csrf-token')?.trim())
+          ? { csrfRequired: true } : {}),
       };
     }
-    if (!Array.isArray(data?.d?.results)) return { error: 'parse', message: 'TSS response did not contain booking details' };
-    return { events: data.d.results };
+    if (csrfToken === 'Fetch') {
+      const token = (resp.headers.get('x-csrf-token') || '').trim();
+      return token && !/^(fetch|required)$/i.test(token) ? { token } : { error: 'csrf-unavailable' };
+    }
+    const text = (await resp.text()).replace(/^\uFEFF/, '').trim();
+    try {
+      return { data: parseTssJson(text) };
+    } catch (error) {
+      return { error: 'parse', message: `${error.message}; ${resp.headers.get('content-type') || 'unknown content type'}` };
+    }
   } catch (error) {
     return { error: refreshRequest.signal?.aborted ? refreshRequest.result() : 'network', message: error.message };
   }
 }
 
-function getBookingDetails(moduleID, eventPkgObjid, term, refreshId) {
-  const refreshRequest = createRefreshRequest(refreshId);
-  const request = bookingRequestQueue.then(async () => {
-    const pause = Math.max(0, 1200 - (Date.now() - lastBookingRequestAt));
-    if (pause) await new Promise((resolve) => setTimeout(resolve, pause));
-    if (refreshRequest.signal?.aborted) return { error: refreshRequest.result() };
-    lastBookingRequestAt = Date.now();
-    return fetchBookingDetails(moduleID, eventPkgObjid, term, refreshRequest);
+async function getBookingCsrf(cookie, refreshRequest) {
+  if (cookie && cachedBookingCsrf?.cookie === cookie && cachedBookingCsrf.expiresAt > Date.now()) {
+    return { token: cachedBookingCsrf.token };
+  }
+  const result = await fetchBookingJson(`${BOOKING_SERVICE_PATH}/?sap-client=500`, refreshRequest, {
+    csrfToken: 'Fetch',
+    expectedCookie: cookie,
   });
-  bookingRequestQueue = request.catch(() => undefined);
-  return request.finally(refreshRequest.finish);
+  if (cookie && result.token) {
+    cachedBookingCsrf = { cookie, token: result.token, expiresAt: Date.now() + 10 * 60_000 };
+  }
+  return result;
+}
+
+async function postBookingAction(action, payload, csrf, cookie, refreshRequest) {
+  const path = `${BOOKING_SERVICE_PATH}/ActionHdrSet?sap-client=500`;
+  const options = {
+    method: 'POST',
+    csrfToken: csrf.token,
+    expectedCookie: cookie,
+    body: JSON.stringify({ ...payload, ActionName: action }),
+  };
+  let result = await fetchBookingJson(path, refreshRequest, options);
+  if (result.csrfRequired) {
+    if (cachedBookingCsrf?.token === csrf.token) cachedBookingCsrf = null;
+    const refreshed = await getBookingCsrf(cookie, refreshRequest);
+    if (refreshed.error) return refreshed;
+    csrf.token = refreshed.token;
+    result = await fetchBookingJson(path, refreshRequest, { ...options, csrfToken: csrf.token });
+    if (result.csrfRequired && cachedBookingCsrf?.token === csrf.token) cachedBookingCsrf = null;
+  }
+  if (result.error) return result;
+  if (!result.data?.d || typeof result.data.d !== 'object') {
+    return { error: 'parse', message: 'TSS did not return a booking action result' };
+  }
+  return { action: result.data.d };
+}
+
+function bookingActionNotices(action) {
+  const rows = [action, ...(Array.isArray(action?.Items?.results) ? action.Items.results : [])];
+  return rows.map((row) => ({
+    type: String(row?.MessageType || '').trim().toUpperCase(),
+    message: String(row?.Message || '').trim(),
+  })).filter((notice) => notice.type || notice.message);
+}
+
+function bookingActionMessage(notices, fallback) {
+  const messages = notices.map((notice) => notice.message).filter(Boolean);
+  return messages.length ? [...new Set(messages)].join('\n') : fallback;
+}
+
+function normalizedNumericId(value) {
+  return String(value || '').replace(/^0+(?=\d)/, '');
+}
+
+function bookingRegistrationState(events) {
+  const rows = Array.isArray(events) ? events : [];
+  const registeredRows = rows.filter((event) => event.Booked === true || Number(event.WaitlistPosition) > 0);
+  return {
+    complete: rows.length > 0 && registeredRows.length === rows.length,
+    any: registeredRows.length > 0,
+    waitlisted: registeredRows.some((event) => event.Booked !== true),
+  };
+}
+
+function bookingHeaderPath(moduleID, eventPkgObjid, term) {
+  const period = String(term.academicPeriod);
+  return `${BOOKING_SERVICE_PATH}/ModuleHeaderSet(` +
+    `SmObjid='${moduleID}',SmOtype='SM',ScObjid='00000000',` +
+    `ModregId=guid'00000000-0000-0000-0000-000000000000',` +
+    `EventPackageId='${eventPkgObjid}',AcademicYear='${term.academicYear}',AcademicSession='${period}')` +
+    `?sap-client=500&$expand=BookingCheckLog%2CCreditOptions`;
+}
+
+function bookingEventsPath(moduleID, eventPkgObjid, term) {
+  const period = String(term.academicPeriod);
+  return `${BOOKING_SERVICE_PATH}/ModuleHeaderSet(` +
+    `SmObjid='${moduleID}',SmOtype='SM',ScObjid='00000000',` +
+    `ModregId=guid'00000000-0000-0000-0000-000000000000',` +
+    `EventPackageId='${eventPkgObjid}',AcademicYear='${term.academicYear}',AcademicSession='${period}')` +
+    `/Event?sap-client=500&$expand=BookingCheckLog%2CRequest%2CEventSchedule%2CCreditOptions`;
+}
+
+async function performClassBooking(moduleID, eventPkgObjid, term, acknowledgedWarnings, refreshRequest) {
+  const id = String(moduleID || '');
+  const packageID = String(eventPkgObjid || '');
+  const year = String(term?.academicYear || '');
+  const period = String(term?.academicPeriod || '');
+  if (!/^\d+$/.test(id) || !/^\d+$/.test(packageID) || !/^\d+$/.test(year) || !/^\d+$/.test(period)) {
+    return { error: 'invalid-request' };
+  }
+
+  const bookingTerm = { academicYear: year, academicPeriod: period };
+  const auth = await getAuth();
+  if (!authPresent(auth)) return { error: 'no-auth' };
+  const cookie = auth.cookie;
+  const headerPath = bookingHeaderPath(id, packageID, bookingTerm);
+  const cachedHeader = cookie && cachedBookingHeader?.cookie === cookie
+    && cachedBookingHeader.path === headerPath && cachedBookingHeader.expiresAt > Date.now() ? cachedBookingHeader : null;
+  const headerResult = cachedHeader?.result || await fetchBookingJson(headerPath, refreshRequest, { expectedCookie: cookie });
+  if (headerResult.error) return headerResult;
+  const eventsPath = bookingEventsPath(id, packageID, bookingTerm);
+  const eventsResult = await fetchBookingJson(eventsPath, refreshRequest, { expectedCookie: cookie });
+  if (eventsResult.error) return eventsResult;
+  const header = headerResult.data?.d;
+  const events = eventsResult.data?.d?.results;
+  if (!header || !Array.isArray(events) || !events.length) {
+    return { error: 'parse', message: 'TSS did not return the selected section booking details' };
+  }
+
+  const currentRegistration = bookingRegistrationState(events);
+  const modregId = String(header.ModregId || '');
+  if (currentRegistration.any || (modregId && !/^0+$/.test(modregId.replace(/-/g, '')))) {
+    return {
+      error: currentRegistration.complete ? 'already-registered' : 'partial-registration',
+      events,
+      registered: currentRegistration.any,
+    };
+  }
+  if (header.Disabled === true || events.some((event) => event.Disabled === true || event.SelectBtnEnable !== true)) {
+    return { error: 'not-bookable', events };
+  }
+
+  const actionModuleID = String(header.SmObjid || '');
+  const programID = String(header.ScObjid || '');
+  const headerPackageID = String(header.EventPackageId || '');
+  const actionYear = String(header.AcademicYear || '');
+  const actionPeriod = String(header.AcademicSession || '');
+  const assignedCg = String(header.AssignedCg || '');
+  const assignedCgTop = String(header.AssignedCgTop || '');
+  const templateID = String(header.TemplateId || '');
+  const credits = String(header.Credits || '');
+  const creditUnit = String(header.CreditUnit || '');
+  const eventIds = events.map((event) => String(event.EventId || ''));
+  if (!/^\d+$/.test(actionModuleID)
+      || normalizedNumericId(actionModuleID) !== normalizedNumericId(id)
+      || !/^\d+$/.test(programID)
+      || normalizedNumericId(headerPackageID) !== normalizedNumericId(packageID)
+      || normalizedNumericId(actionYear) !== normalizedNumericId(year)
+      || normalizedNumericId(actionPeriod) !== normalizedNumericId(period)
+      || !/^\d+$/.test(assignedCg)
+      || !/^\d+$/.test(assignedCgTop)
+      || !/^\d+$/.test(templateID)
+      || !/^\d+(?:\.\d+)?$/.test(credits)
+      || !/^[A-Za-z0-9_-]+$/.test(creditUnit)
+      || eventIds.some((eventID) => !/^\d+$/.test(eventID))) {
+    return { error: 'booking-data-incomplete', events };
+  }
+  if (!/^0{8}-0{4}-0{4}-0{4}-0{12}$/i.test(modregId)) {
+    return { error: 'booking-data-incomplete', events };
+  }
+
+  const payload = {
+    ModuleId: actionModuleID,
+    ProgramId: programID,
+    Items: events.map((event, index) => ({
+      EventId: eventIds[index],
+      ModuleId: actionModuleID,
+      AcademicYear: actionYear,
+      AcademicSession: actionPeriod,
+      EventPackId: packageID,
+    })),
+    AssignedCg: assignedCg,
+    AssignedCgTop: assignedCgTop,
+    TemplateId: templateID,
+    EventPackId: packageID,
+    ModregId: modregId,
+    AcademicYear: actionYear,
+    AcademicSession: actionPeriod,
+    Credits: credits,
+    CreditUnit: creditUnit,
+  };
+
+  if (cookie && !cachedHeader) {
+    cachedBookingHeader = { cookie, path: headerPath, result: headerResult, expiresAt: Date.now() + 2 * 60_000 };
+  }
+  const csrf = await getBookingCsrf(cookie, refreshRequest);
+  if (csrf.error) return csrf;
+  const checkResult = await postBookingAction('CheckRegistration', payload, csrf, cookie, refreshRequest);
+  if (checkResult.error) return checkResult;
+  const checkNotices = bookingActionNotices(checkResult.action);
+  const checkErrors = checkNotices.filter((notice) => ['E', 'A', 'X'].includes(notice.type));
+  if (checkErrors.length) {
+    return { error: 'registration-check', message: bookingActionMessage(checkErrors, 'TSS could not approve this booking.'), events };
+  }
+  const checkWarnings = checkNotices.filter((notice) => notice.type === 'W'
+    || (notice.message && !['', 'S', 'I'].includes(notice.type))
+    || (notice.message && !notice.type));
+  const warningText = [...new Set(checkWarnings.map((notice) => notice.message || 'TSS returned a registration warning.'))].join('\n');
+  if (warningText && warningText !== String(acknowledgedWarnings || '')) {
+    return { needsConfirmation: true, warnings: warningText, events };
+  }
+
+  if (cachedBookingHeader?.path === headerPath) cachedBookingHeader = null;
+  const saveResult = await postBookingAction('SaveChanges', payload, csrf, cookie, refreshRequest);
+  const finalResult = await fetchBookingJson(eventsPath, refreshRequest, { expectedCookie: cookie });
+  if (finalResult.error) {
+    return {
+      error: 'booking-unconfirmed',
+      statusUncertain: true,
+      message: saveResult.error
+        ? `TSS did not confirm the save (HTTP ${saveResult.status || 'network error'}), and the booking status could not be refreshed.`
+        : 'TSS accepted the save request, but the booking status could not be refreshed.',
+    };
+  }
+  const finalEvents = finalResult.data?.d?.results;
+  if (!Array.isArray(finalEvents) || !finalEvents.length) {
+    return { error: 'booking-unconfirmed', statusUncertain: true, message: 'TSS returned no booking status after the save request.' };
+  }
+  const finalRegistration = bookingRegistrationState(finalEvents);
+  if (finalRegistration.complete) {
+    const saveNotices = saveResult.action ? bookingActionNotices(saveResult.action) : [];
+    return {
+      booked: !finalRegistration.waitlisted,
+      waitlisted: finalRegistration.waitlisted,
+      recoveredAfterSaveError: Boolean(saveResult.error),
+      message: saveResult.error ? 'The refreshed TSS status confirms the booking.' : bookingActionMessage(saveNotices, ''),
+      events: finalEvents,
+    };
+  }
+  if (finalRegistration.any) {
+    return {
+      error: 'partial-registration',
+      statusUncertain: true,
+      message: 'TSS shows only some section components as registered. Refresh class info before taking another action.',
+      events: finalEvents,
+      registered: true,
+    };
+  }
+  const saveNotices = saveResult.action ? bookingActionNotices(saveResult.action) : [];
+  const saveErrors = saveNotices.filter((notice) => ['E', 'A', 'X'].includes(notice.type));
+  return {
+    error: saveResult.error ? 'save-failed' : saveErrors.length ? 'save-failed' : 'booking-unconfirmed',
+    statusUncertain: true,
+    status: saveResult.status,
+    message: saveResult.error
+      ? `TSS did not confirm the save (HTTP ${saveResult.status || 'network error'}). Refresh class info before trying again.`
+      : bookingActionMessage(saveErrors, bookingActionMessage(saveNotices, 'TSS has not confirmed this booking. Refresh class info before trying again.')),
+    events: finalEvents,
+  };
+}
+
+const activeBookingRequests = new Map();
+
+function bookClass(moduleID, eventPkgObjid, term, acknowledgedWarnings, refreshId) {
+  const key = `${moduleID}|${eventPkgObjid}|${term?.academicYear}|${term?.academicPeriod}`;
+  if (activeBookingRequests.has(key)) return activeBookingRequests.get(key);
+  const refreshRequest = createRefreshRequest(refreshId, 90000);
+  const request = performClassBooking(moduleID, eventPkgObjid, term, acknowledgedWarnings, refreshRequest);
+  const trackedRequest = request.finally(() => {
+    refreshRequest.finish();
+    if (activeBookingRequests.get(key) === trackedRequest) activeBookingRequests.delete(key);
+  });
+  activeBookingRequests.set(key, trackedRequest);
+  return trackedRequest;
 }
 
 // ----- API: signed-in student profile and timetable -----
@@ -1978,6 +2255,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'getBookingDetails') {
     trackApiResult(msg.type, getBookingDetails(msg.moduleID, msg.eventPkgObjid, msg.term, msg.refreshId)).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'bookClass') {
+    if (!isExtensionPageSender(sender)) return false;
+    trackApiResult(msg.type, bookClass(
+      msg.moduleID,
+      msg.eventPkgObjid,
+      msg.term,
+      msg.acknowledgedWarnings,
+      msg.refreshId,
+    )).then(sendResponse).catch(() => sendResponse({ error: 'background' }));
     return true;
   }
   if (msg.type === 'getPersonalDetails') {
